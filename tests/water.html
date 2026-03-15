@@ -3,33 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>UHD Physics Fluid</title>
+    <title>UHD Fluid - Gravity Corrected</title>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #010409; }
         canvas { display: block; width: 100vw; height: 100vh; }
-        #hint { 
-            position: absolute; top: 50%; width: 100%; text-align: center; 
-            color: rgba(255,255,255,0.4); font-family: sans-serif; pointer-events: none; 
+        #overlay { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            display: flex; align-items: center; justify-content: center;
+            color: #58a6ff; font-family: sans-serif; cursor: pointer; z-index: 10;
+            background: rgba(0,0,0,0.1); text-transform: uppercase; letter-spacing: 2px;
         }
     </style>
 </head>
 <body>
-    <div id="hint">Tap to enable tilt sensors</div>
+    <div id="overlay">Tap to Unlock Fluid Physics</div>
     <canvas id="canvas"></canvas>
 
 <script>
 /**
- * UHD HYPER-REALISTIC FLUID SIMULATION
- * Features: WebGL 2.0, Gravity-based physics, Caustics, Specular highlights
+ * REBUILT UHD FLUID SIMULATION
+ * Fixes: Water starts at bottom, stays visible when sensors engage.
  */
 const canvas = document.querySelector('#canvas');
-const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+const gl = canvas.getContext('webgl2', { antialias: true });
 
-if (!gl) {
-    document.body.innerHTML = "WebGL 2.0 not supported on this device.";
-}
-
-// Shader Source
 const vs = `#version 300 es
     in vec2 pos;
     void main() { gl_Position = vec4(pos, 0.0, 1.0); }`;
@@ -38,146 +35,124 @@ const fs = `#version 300 es
     precision highp float;
     uniform vec2 u_res;
     uniform float u_time;
-    uniform vec2 u_gravity;
+    uniform vec2 u_grav; // The gravity vector
     out vec4 col;
 
-    // High-quality noise for water surface texture
-    vec2 hash(vec2 p) {
-        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-        return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
-    }
-
+    // Fractional Brownian Motion for UHD water texture
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float noise(vec2 p) {
         vec2 i = floor(p); vec2 f = fract(p);
         vec2 u = f*f*(3.0-2.0*f);
-        return mix(mix(dot(hash(i + vec2(0,0)), f - vec2(0,0)), 
-                       dot(hash(i + vec2(1,0)), f - vec2(1,0)), u.x),
-                   mix(dot(hash(i + vec2(0,1)), f - vec2(0,1)), 
-                       dot(hash(i + vec2(1,1)), f - vec2(1,1)), u.x), u.y);
+        return mix(mix(hash(i + vec2(0,0)), hash(i + vec2(1,0)), u.x),
+                   mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x), u.y);
     }
 
     void main() {
-        vec2 uv = gl_FragCoord.xy / u_res;
         vec2 p = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
         
-        // PHYSICAL FLUID BOUNDARY
-        // Gravity determines which screen edge is the "bottom"
-        float floorLevel = dot(p, u_gravity) + 0.75;
+        // PHYSICAL ALIGNMENT
+        // u_grav represents the "down" direction. 
+        // Water surface is perpendicular to this vector.
+        float surfacePos = dot(p, u_grav) + 0.6; 
         
         // WAVE DYNAMICS
-        float wave = noise(p * 1.5 + u_time * 0.4) * 0.08;
-        wave += noise(p * 3.0 - u_time * 0.7) * 0.04;
+        float waves = noise(p * 2.5 + u_time * 0.5) * 0.05;
+        waves += noise(p * 5.0 - u_time * 0.8) * 0.02;
         
-        float dist = floorLevel + wave;
-        
-        // RENDERING
+        float dist = surfacePos + waves;
+
         if (dist < 0.0) {
-            // Water Interior
-            float depth = abs(dist);
+            // Water rendering
+            float d = abs(dist);
+            vec3 color = mix(vec3(0.05, 0.4, 0.7), vec3(0.01, 0.1, 0.25), clamp(d*2.0, 0.0, 1.0));
             
-            // Base Colors
-            vec3 deepBlue = vec3(0.005, 0.08, 0.18);
-            vec3 shallowBlue = vec3(0.1, 0.45, 0.7);
-            vec3 waterCol = mix(shallowBlue, deepBlue, smoothstep(0.0, 0.8, depth));
+            // Caustics & Specular
+            float shimmer = pow(noise(p * 4.0 + u_grav * u_time), 3.0);
+            color += shimmer * 0.15;
             
-            // Refractive Caustics (Light patterns on the floor)
-            vec2 cUV = p * 2.5;
-            float caustics = 0.0;
-            for(int i=0; i<3; i++) {
-                cUV += u_gravity * 0.2;
-                caustics += abs(noise(cUV + u_time * 0.2));
-            }
-            waterCol += pow(caustics, 3.0) * 0.15 * (1.0 - depth);
+            // Surface highlight
+            float highlight = smoothstep(-0.04, 0.0, dist);
+            color = mix(color, vec3(0.8, 0.95, 1.0), highlight * 0.4);
             
-            // Surface Specular Highlight
-            float spec = smoothstep(-0.05, 0.0, dist);
-            waterCol += spec * vec3(0.5, 0.8, 1.0) * 0.6;
-            
-            col = vec4(waterCol, 1.0);
+            col = vec4(color, 1.0);
         } else {
-            // Empty Space (Container)
-            col = vec4(0.02, 0.03, 0.05, 1.0);
+            // Background / Container
+            col = vec4(0.02, 0.04, 0.07, 1.0);
         }
     }`;
 
-// Helper: Compile Shaders
-function compile(gl, type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    return s;
-}
-
+// Init WebGL
 const prog = gl.createProgram();
-gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, vs));
-gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, fs));
-gl.linkProgram(prog);
-gl.useProgram(prog);
+function addShader(t, s) {
+    const sh = gl.createShader(t);
+    gl.shaderSource(sh, s); gl.compileShader(sh); gl.attachShader(prog, sh);
+}
+addShader(gl.VERTEX_SHADER, vs);
+addShader(gl.FRAGMENT_SHADER, fs);
+gl.linkProgram(prog); gl.useProgram(prog);
 
-// Buffer Setup
-const vertices = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
-gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
 const pos = gl.getAttribLocation(prog, "pos");
 gl.enableVertexAttribArray(pos);
 gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
 
-// Uniforms
-const uRes = gl.getUniformLocation(prog, "u_res");
-const uTime = gl.getUniformLocation(prog, "u_time");
-const uGrav = gl.getUniformLocation(prog, "u_gravity");
+// Default Gravity: Screen Bottom
+let grav = { x: 0, y: 1 }; 
+let targetGrav = { x: 0, y: 1 };
 
-let gravity = { x: 0, y: -1 };
+function handleMotion(e) {
+    // Correct mapping of tilt to 2D vector
+    // Beta: Front/Back tilt (-180 to 180)
+    // Gamma: Left/Right tilt (-90 to 90)
+    let b = e.beta * (Math.PI / 180);
+    let g = e.gamma * (Math.PI / 180);
 
-// Device Orientation Logic
-function handleOrientation(e) {
-    // Calculate 2D gravity vector from 3D orientation
-    const pitch = e.beta * (Math.PI / 180);  // -180 to 180
-    const roll = e.gamma * (Math.PI / 180);   // -90 to 90
+    // This math ensures the vector points "down" relative to the phone's orientation
+    targetGrav.x = Math.sin(g);
+    targetGrav.y = -Math.sin(b) * Math.cos(g);
     
-    // Smoothly interpolate gravity to prevent jitter
-    gravity.x = Math.sin(roll);
-    gravity.y = -Math.sin(pitch);
+    // Normalize to prevent the water from disappearing
+    let len = Math.sqrt(targetGrav.x**2 + targetGrav.y**2);
+    if(len > 0) {
+        targetGrav.x /= len;
+        targetGrav.y /= len;
+    }
 }
 
-// User Activation (Required for iOS/Chrome sensors)
-window.addEventListener('click', async () => {
-    if (typeof DeviceOrientationEvent !== 'undefined' && 
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-        try {
-            const permission = await DeviceOrientationEvent.requestPermission();
-            if (permission === 'granted') {
-                window.addEventListener('deviceorientation', handleOrientation);
-            }
-        } catch (err) { console.error(err); }
+document.getElementById('overlay').addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res === 'granted') window.addEventListener('deviceorientation', handleMotion);
     } else {
-        window.addEventListener('deviceorientation', handleOrientation);
+        window.addEventListener('deviceorientation', handleMotion);
     }
-    document.querySelector('#hint').style.display = 'none';
+    document.getElementById('overlay').style.display = 'none';
 });
 
-// UHD Resize Logic
 function resize() {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = window.innerWidth * dpr;
     canvas.height = window.innerHeight * dpr;
     gl.viewport(0, 0, canvas.width, canvas.height);
 }
-
 window.addEventListener('resize', resize);
 resize();
 
-function render(t) {
-    gl.uniform2f(uRes, canvas.width, canvas.height);
-    gl.uniform1f(uTime, t * 0.001);
-    gl.uniform2f(uGrav, gravity.x, gravity.y);
+function animate(t) {
+    // Smooth interpolation (lerp) for liquid slosh feel
+    grav.x += (targetGrav.x - grav.x) * 0.1;
+    grav.y += (targetGrav.y - grav.y) * 0.1;
+
+    gl.uniform2f(gl.getUniformLocation(prog, "u_res"), canvas.width, canvas.height);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_time"), t * 0.001);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_grav"), grav.x, grav.y);
     
     gl.drawArrays(gl.TRIANGLES, 0, 6);
-    requestAnimationFrame(render);
+    requestAnimationFrame(animate);
 }
-
-requestAnimationFrame(render);
+requestAnimationFrame(animate);
 </script>
 </body>
 </html>
