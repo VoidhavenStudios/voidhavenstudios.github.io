@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Piano RL Lab - Neural Visualizer Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tonejs/piano@0.2.1/build/index.min.js"></script>
+    <style>
+        :root { --accent: #00f2ff; --reward: #00ff88; --bg: #050505; --ui: #151515; }
+        body { font-family: 'Consolas', monospace; background: var(--bg); color: #fff; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: var(--ui); padding: 10px 20px; display: flex; gap: 20px; align-items: center; border-bottom: 1px solid #333; z-index: 100; }
+        .control { display: flex; flex-direction: column; gap: 4px; }
+        label { font-size: 10px; color: #888; text-transform: uppercase; }
+        select, input { background: #000; border: 1px solid #444; color: #fff; padding: 5px; border-radius: 3px; }
+
+        #main-container { flex: 1; display: flex; overflow: hidden; position: relative; }
+        
+        #viewport { flex: 2; overflow: auto; background: #080808; position: relative; border-right: 1px solid #333; }
+        #piano-roll { position: relative; width: 4000px; height: 1760px; background-image: linear-gradient(#111 1px, transparent 1px); background-size: 100% 20px; }
+        .note { position: absolute; border-radius: 2px; background: #3d5afe; cursor: pointer; border: 1px solid rgba(255,255,255,0.2); }
+        .note.selected { background: var(--reward); box-shadow: 0 0 15px var(--reward); border-color: #fff; }
+
+        #visualizer-pane { flex: 1; background: #000; position: relative; display: flex; flex-direction: column; }
+        #vis-canvas { width: 100%; height: 100%; }
+        .pane-title { position: absolute; top: 10px; left: 10px; font-size: 12px; color: var(--accent); pointer-events: none; }
+
+        footer { background: var(--ui); padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #333; }
+        button { padding: 8px 15px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; background: #333; color: #fff; }
+        button:hover { background: #444; }
+        .btn-gen { background: #3d5afe; }
+        .btn-train { background: var(--reward); color: #000; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="control"><label>Time Sig</label><select id="timeSig"><option value="4">4/4</option><option value="3">3/4</option></select></div>
+    <div class="control"><label>Scale</label><select id="keySig"><option value="0">C Maj</option><option value="2">D Maj</option><option value="5">F Maj</option></select></div>
+    <div class="control"><label>Sec</label><input type="number" id="duration" value="10" style="width:40px"></div>
+    <div id="status" style="color: var(--accent); font-size: 12px;">Initializing Neural Engine...</div>
+</header>
+
+<div id="main-container">
+    <div id="viewport">
+        <div id="piano-roll"></div>
+    </div>
+    <div id="visualizer-pane">
+        <div class="pane-title">NEURAL WEIGHT MAP (SENSING TRANSITIONS)</div>
+        <canvas id="vis-canvas"></canvas>
+    </div>
+</div>
+
+<footer>
+    <div style="display:flex; gap:10px;">
+        <button class="btn-gen" id="genBtn">Generate AI Track</button>
+        <button id="replayBtn">Replay Selected</button>
+        <button class="btn-train" id="trainBtn">Reinforce Selection (Train)</button>
+    </div>
+    <button onclick="clearBrain()" style="background:#800">Wipe Brain</button>
+</footer>
+
+<script>
+    const DB_NAME = "PianoRL_v4";
+    let db;
+    const dbReq = indexedDB.open(DB_NAME, 1);
+    dbReq.onupgradeneeded = (e) => e.target.result.createObjectStore("weights");
+    dbReq.onsuccess = (e) => { db = e.target.result; document.getElementById('status').innerText = "Neural Engine: Online"; };
+
+    async function getWeights(midi) {
+        return new Promise(res => {
+            const req = db.transaction("weights").objectStore("weights").get(midi);
+            req.onsuccess = () => res(req.result || Array(88).fill(0.1));
+        });
+    }
+
+    async function saveWeights(midi, weights) {
+        return new Promise(res => {
+            const tx = db.transaction("weights", "readwrite");
+            tx.objectStore("weights").put(weights, midi);
+            tx.oncomplete = res;
+        });
+    }
+
+    const piano = new Tone.Sampler({
+        urls: { A0: "A0.mp3", C1: "C1.mp3", "D#1": "Ds1.mp3", "F#1": "Fs1.mp3", A1: "A1.mp3", C4: "C4.mp3" },
+        baseUrl: "https://tonejs.github.io",
+    }).toDestination();
+
+    const roll = document.getElementById('piano-roll');
+    const visCanvas = document.getElementById('vis-canvas');
+    const visCtx = visCanvas.getContext('2d');
+    let sessionNotes = [];
+
+    async function drawNeuralMap(sourceMidi) {
+        visCanvas.width = visCanvas.offsetWidth;
+        visCanvas.height = visCanvas.offsetHeight;
+        visCtx.clearRect(0, 0, visCanvas.width, visCanvas.height);
+        
+        const weights = await getWeights(sourceMidi);
+        const maxWeight = Math.max(...weights);
+
+        const startX = 50, endX = visCanvas.width - 50;
+        const startY = visCanvas.height / 2;
+
+        weights.forEach((w, targetMidi) => {
+            if (w < 0.15 && w !== maxWeight) return;
+            
+            const targetY = (88 - targetMidi) * (visCanvas.height / 88);
+            const alpha = Math.min(w / maxWeight, 1);
+            
+            visCtx.beginPath();
+            visCtx.moveTo(startX, startY);
+            visCtx.bezierCurveTo(startX + 100, startY, endX - 100, targetY, endX, targetY);
+            visCtx.strokeStyle = targetMidi === weights.indexOf(maxWeight) ? `rgba(0,255,136,${alpha})` : `rgba(0,242,255,${alpha * 0.4})`;
+            visCtx.lineWidth = 1 + (alpha * 3);
+            visCtx.stroke();
+        });
+
+        visCtx.fillStyle = var(--accent);
+        visCtx.beginPath(); visCtx.arc(startX, startY, 6, 0, Math.PI*2); visCtx.fill();
+    }
+
+    /** --- CORE LOGIC --- **/
+    async function generate() {
+        await Tone.start();
+        roll.innerHTML = '';
+        sessionNotes = [];
+        const dur = parseInt(document.getElementById('duration').value);
+        const keyShift = parseInt(document.getElementById('keySig').value);
+        
+        let time = 0;
+        let lastMidi = 40;
+
+        while(time < dur) {
+            const weights = await getWeights(lastMidi);
+            const scale = [0,2,4,5,7,9,11].map(n => (n + keyShift) % 12);
+            
+            // AI Decision
+            const weighted = weights.map((w, i) => scale.includes(i % 12) ? w * 3 : w);
+            const total = weighted.reduce((a, b) => a + b, 0);
+            let r = Math.random() * total;
+            let midi = 40;
+            for(let i=0; i<88; i++) { r -= weighted[i]; if(r <= 0) { midi = i; break; } }
+
+            const note = { midi, time: time + Math.random()*0.02, dur: 0.4, vel: 0.5 + Math.random()*0.4, selected: false };
+            sessionNotes.push(note);
+            
+            const el = document.createElement('div');
+            el.className = 'note';
+            el.style.left = (note.time * 150) + 'px';
+            el.style.top = ((88 - note.midi) * 20) + 'px';
+            el.style.width = '58px'; el.style.height = '18px';
+            el.onclick = () => { 
+                note.selected = !note.selected; 
+                el.classList.toggle('selected'); 
+                drawNeuralMap(note.midi);
+            };
+            roll.appendChild(el);
+
+            piano.triggerAttackRelease(Tone.Frequency(midi + 21, "midi"), 0.4, Tone.now() + note.time, note.vel);
+            time += 0.5;
+            lastMidi = midi;
+        }
+    }
+
+    document.getElementById('trainBtn').onclick = async () => {
+        const selected = sessionNotes.filter(n => n.selected);
+        if(selected.length < 2) return;
+        
+        for(let i=0; i < selected.length - 1; i++) {
+            const w = await getWeights(selected[i].midi);
+            w[selected[i+1].midi] += 2.0;
+            await saveWeights(selected[i].midi, w);
+        }
+        document.getElementById('status').innerText = "Training Complete. Model Optimized.";
+        drawNeuralMap(selected[selected.length-1].midi);
+    };
+
+    document.getElementById('genBtn').onclick = generate;
+    document.getElementById('replayBtn').onclick = () => {
+        const now = Tone.now();
+        sessionNotes.forEach(n => { if(n.selected) piano.triggerAttackRelease(Tone.Frequency(n.midi+21, "midi"), n.dur, now + n.time, n.vel); });
+    };
+
+    function clearBrain() { 
+        if(confirm("Wipe AI Knowledge?")) {
+            indexedDB.deleteDatabase(DB_NAME);
+            location.reload();
+        }
+    }
+</script>
+</body>
+</html>
