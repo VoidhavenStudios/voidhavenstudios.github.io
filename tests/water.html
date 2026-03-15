@@ -3,30 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>UHD Fluid - Gravity Corrected</title>
+    <title>UHD Volume Fluid Sim</title>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #010409; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #02050a; }
         canvas { display: block; width: 100vw; height: 100vh; }
-        #overlay { 
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
-            display: flex; align-items: center; justify-content: center;
-            color: #58a6ff; font-family: sans-serif; cursor: pointer; z-index: 10;
-            background: rgba(0,0,0,0.1); text-transform: uppercase; letter-spacing: 2px;
+        #btn { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            padding: 20px 40px; color: white; border: 1px solid #4af; background: rgba(0,160,255,0.1);
+            border-radius: 8px; font-family: sans-serif; cursor: pointer; z-index: 100;
         }
     </style>
 </head>
 <body>
-    <div id="overlay">Tap to Unlock Fluid Physics</div>
+    <div id="btn">TAP TO FILL CONTAINER</div>
     <canvas id="canvas"></canvas>
 
 <script>
-/**
- * REBUILT UHD FLUID SIMULATION
- * Fixes: Water starts at bottom, stays visible when sensors engage.
- */
-const canvas = document.querySelector('#canvas');
-const gl = canvas.getContext('webgl2', { antialias: true });
+const canvas = document.getElementById('canvas');
+const gl = canvas.getContext('webgl2');
 
+// SETTINGS
+const PARTICLE_COUNT = 45; // High enough for splashes, low enough for 4K 60fps
+const RADIUS = 0.22;       // Size of "blobs"
+const BOUNCE = -0.6;      // Energy lost on splash
+const GRAVITY_STR = 0.0008;
+
+let particles = [];
+let grav = { x: 0, y: -1 }; // Default down
+
+// SHADERS
 const vs = `#version 300 es
     in vec2 pos;
     void main() { gl_Position = vec4(pos, 0.0, 1.0); }`;
@@ -34,101 +39,104 @@ const vs = `#version 300 es
 const fs = `#version 300 es
     precision highp float;
     uniform vec2 u_res;
-    uniform float u_time;
-    uniform vec2 u_grav; // The gravity vector
+    uniform vec3 u_parts[${PARTICLE_COUNT}];
     out vec4 col;
 
-    // Fractional Brownian Motion for UHD water texture
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float noise(vec2 p) {
-        vec2 i = floor(p); vec2 f = fract(p);
-        vec2 u = f*f*(3.0-2.0*f);
-        return mix(mix(hash(i + vec2(0,0)), hash(i + vec2(1,0)), u.x),
-                   mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x), u.y);
-    }
-
     void main() {
-        vec2 p = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
+        vec2 uv = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
+        float density = 0.0;
         
-        // PHYSICAL ALIGNMENT
-        // u_grav represents the "down" direction. 
-        // Water surface is perpendicular to this vector.
-        float surfacePos = dot(p, u_grav) + 0.6; 
-        
-        // WAVE DYNAMICS
-        float waves = noise(p * 2.5 + u_time * 0.5) * 0.05;
-        waves += noise(p * 5.0 - u_time * 0.8) * 0.02;
-        
-        float dist = surfacePos + waves;
+        for(int i=0; i<${PARTICLE_COUNT}; i++) {
+            vec2 p = u_parts[i].xy;
+            float d = distance(uv, p);
+            density += (u_parts[i].z * u_parts[i].z) / (d * d);
+        }
 
-        if (dist < 0.0) {
-            // Water rendering
-            float d = abs(dist);
-            vec3 color = mix(vec3(0.05, 0.4, 0.7), vec3(0.01, 0.1, 0.25), clamp(d*2.0, 0.0, 1.0));
-            
-            // Caustics & Specular
-            float shimmer = pow(noise(p * 4.0 + u_grav * u_time), 3.0);
-            color += shimmer * 0.15;
-            
-            // Surface highlight
-            float highlight = smoothstep(-0.04, 0.0, dist);
-            color = mix(color, vec3(0.8, 0.95, 1.0), highlight * 0.4);
-            
-            col = vec4(color, 1.0);
+        if(density > 1.0) {
+            // Water look
+            vec3 base = mix(vec3(0.0, 0.2, 0.5), vec3(0.4, 0.8, 1.0), smoothstep(1.0, 1.8, density));
+            // Specular "wet" look
+            float spec = pow(smoothstep(1.0, 1.1, density), 5.0);
+            col = vec4(base + spec * 0.4, 1.0);
         } else {
-            // Background / Container
-            col = vec4(0.02, 0.04, 0.07, 1.0);
+            col = vec4(0.01, 0.02, 0.04, 1.0);
         }
     }`;
 
-// Init WebGL
+// WEBGL SETUP
 const prog = gl.createProgram();
-function addShader(t, s) {
+function addSh(t, s) {
     const sh = gl.createShader(t);
     gl.shaderSource(sh, s); gl.compileShader(sh); gl.attachShader(prog, sh);
 }
-addShader(gl.VERTEX_SHADER, vs);
-addShader(gl.FRAGMENT_SHADER, fs);
+addSh(gl.VERTEX_SHADER, vs);
+addSh(gl.FRAGMENT_SHADER, fs);
 gl.linkProgram(prog); gl.useProgram(prog);
 
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
-const pos = gl.getAttribLocation(prog, "pos");
-gl.enableVertexAttribArray(pos);
-gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+const aPos = gl.getAttribLocation(prog, "pos");
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-// Default Gravity: Screen Bottom
-let grav = { x: 0, y: 1 }; 
-let targetGrav = { x: 0, y: 1 };
+const uRes = gl.getUniformLocation(prog, "u_res");
+const uParts = gl.getUniformLocation(prog, "u_parts");
 
-function handleMotion(e) {
-    // Correct mapping of tilt to 2D vector
-    // Beta: Front/Back tilt (-180 to 180)
-    // Gamma: Left/Right tilt (-90 to 90)
-    let b = e.beta * (Math.PI / 180);
-    let g = e.gamma * (Math.PI / 180);
-
-    // This math ensures the vector points "down" relative to the phone's orientation
-    targetGrav.x = Math.sin(g);
-    targetGrav.y = -Math.sin(b) * Math.cos(g);
-    
-    // Normalize to prevent the water from disappearing
-    let len = Math.sqrt(targetGrav.x**2 + targetGrav.y**2);
-    if(len > 0) {
-        targetGrav.x /= len;
-        targetGrav.y /= len;
+// PHYSICS LOGIC
+function initParticles() {
+    particles = [];
+    for(let i=0; i<PARTICLE_COUNT; i++) {
+        particles.push({
+            x: (Math.random() - 0.5), y: (Math.random() - 0.5),
+            vx: 0, vy: 0, r: RADIUS
+        });
     }
 }
 
-document.getElementById('overlay').addEventListener('click', async () => {
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        const res = await DeviceOrientationEvent.requestPermission();
-        if (res === 'granted') window.addEventListener('deviceorientation', handleMotion);
-    } else {
-        window.addEventListener('deviceorientation', handleMotion);
+function updatePhysics() {
+    const aspect = canvas.width / canvas.height;
+    const boundaryX = aspect > 1 ? aspect : 1.0;
+    const boundaryY = aspect < 1 ? 1.0 / aspect : 1.0;
+
+    particles.forEach(p => {
+        p.vx += grav.x * GRAVITY_STR;
+        p.vy += grav.y * GRAVITY_STR;
+        
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Wall collisions (visible viewport boundaries)
+        if (Math.abs(p.x) > boundaryX - (p.r * 0.4)) {
+            p.x = Math.sign(p.x) * (boundaryX - (p.r * 0.4));
+            p.vx *= BOUNCE;
+        }
+        if (Math.abs(p.y) > boundaryY - (p.r * 0.4)) {
+            p.y = Math.sign(p.y) * (boundaryY - (p.r * 0.4));
+            p.vy *= BOUNCE;
+        }
+
+        // Friction
+        p.vx *= 0.99;
+        p.vy *= 0.99;
+    });
+}
+
+// SENSORS
+window.addEventListener('deviceorientation', (e) => {
+    let b = e.beta * (Math.PI / 180);
+    let g = e.gamma * (Math.PI / 180);
+    // Fixed inversion: Y follows Beta, X follows Gamma
+    grav.x = Math.sin(g) * 15.0;
+    grav.y = -Math.sin(b) * 15.0;
+});
+
+document.getElementById('btn').addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
+        await DeviceOrientationEvent.requestPermission();
     }
-    document.getElementById('overlay').style.display = 'none';
+    initParticles();
+    document.getElementById('btn').style.display = 'none';
 });
 
 function resize() {
@@ -139,20 +147,23 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+initParticles();
 
-function animate(t) {
-    // Smooth interpolation (lerp) for liquid slosh feel
-    grav.x += (targetGrav.x - grav.x) * 0.1;
-    grav.y += (targetGrav.y - grav.y) * 0.1;
+function draw() {
+    updatePhysics();
+    const data = new Float32Array(PARTICLE_COUNT * 3);
+    particles.forEach((p, i) => {
+        data[i*3] = p.x;
+        data[i*3+1] = p.y;
+        data[i*3+2] = p.r;
+    });
 
-    gl.uniform2f(gl.getUniformLocation(prog, "u_res"), canvas.width, canvas.height);
-    gl.uniform1f(gl.getUniformLocation(prog, "u_time"), t * 0.001);
-    gl.uniform2f(gl.getUniformLocation(prog, "u_grav"), grav.x, grav.y);
-    
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.uniform3fv(uParts, data);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
-    requestAnimationFrame(animate);
+    requestAnimationFrame(draw);
 }
-requestAnimationFrame(animate);
+requestAnimationFrame(draw);
 </script>
 </body>
 </html>
