@@ -3,34 +3,34 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>UHD Fluid Container</title>
+    <title>UHD Fluid Volume</title>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #010204; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #01050a; }
         canvas { display: block; width: 100vw; height: 100vh; }
-        #ui { 
-            position: absolute; top: 50%; width: 100%; text-align: center; 
-            color: #4af; font-family: sans-serif; pointer-events: none; z-index: 10;
+        #tap { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            display: flex; align-items: center; justify-content: center;
+            color: #4af; font-family: sans-serif; cursor: pointer; z-index: 10;
         }
     </style>
 </head>
 <body>
-    <div id="ui">Tap to Fill Screen with Water</div>
+    <div id="tap">TAP TO START FLUID</div>
     <canvas id="canvas"></canvas>
 
 <script>
-/**
- * UHD BOUNDED FLUID SIMULATION
- * Features: High-density particles, Viewport collision, 4K Sharpness
- */
 const canvas = document.getElementById('canvas');
 const gl = canvas.getContext('webgl2');
 
-// Increase count for "volume" look. Adjust based on device power.
-const P_COUNT = 120; 
-const P_DATA = new Float32Array(P_COUNT * 3); // x, y, radius
+// Fluid Config
+const P_COUNT = 140; 
+const P_DATA = new Float32Array(P_COUNT * 3);
+const RADIUS = 0.14;
+const SPACING = 0.15; // Particle repulsion distance
 let particles = [];
+let grav = { x: 0, y: -0.0008 };
 
-// Shader Logic
+// Shaders
 const vs = `#version 300 es
     in vec2 pos;
     void main() { gl_Position = vec4(pos, 0.0, 1.0); }`;
@@ -40,38 +40,32 @@ const fs = `#version 300 es
     uniform vec2 u_res;
     uniform vec3 u_p[${P_COUNT}];
     out vec4 col;
-
     void main() {
         vec2 uv = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
         float m = 0.0;
-        
-        // Metaball accumulation for smooth fluid surface
         for(int i=0; i<${P_COUNT}; i++) {
             float d = distance(uv, u_p[i].xy);
             m += (u_p[i].z * u_p[i].z) / (d * d);
         }
-
-        if(m > 1.2) {
-            vec3 water = mix(vec3(0.0, 0.3, 0.6), vec3(0.5, 0.9, 1.0), smoothstep(1.2, 2.0, m));
+        if(m > 1.5) {
+            vec3 water = mix(vec3(0.0, 0.2, 0.5), vec3(0.4, 0.8, 1.0), smoothstep(1.5, 3.0, m));
             col = vec4(water, 1.0);
         } else {
-            col = vec4(0.02, 0.03, 0.05, 1.0);
+            col = vec4(0.02, 0.04, 0.08, 1.0);
         }
     }`;
 
-// Init Particles in a "pile"
 function init() {
     particles = [];
     for(let i=0; i<P_COUNT; i++) {
         particles.push({
-            x: (Math.random() - 0.5) * 0.5, 
-            y: (Math.random() - 0.5) * 0.5,
-            vx: 0, vy: 0, r: 0.12
+            x: (Math.random() - 0.5) * 0.2, 
+            y: (Math.random() - 0.5) * 0.2,
+            vx: 0, vy: 0, r: RADIUS
         });
     }
 }
 
-// WebGL Setup
 const prg = gl.createProgram();
 function s(t, c) { const h = gl.createShader(t); gl.shaderSource(h, c); gl.compileShader(h); gl.attachShader(prg, h); }
 s(gl.VERTEX_SHADER, vs); s(gl.FRAGMENT_SHADER, fs);
@@ -84,41 +78,58 @@ const pL = gl.getAttribLocation(prg, "pos");
 gl.enableVertexAttribArray(pL);
 gl.vertexAttribPointer(pL, 2, gl.FLOAT, false, 0, 0);
 
-let g = { x: 0, y: -0.001 }; // Gravity
-
 function update() {
+    // CORRECT BOUNDS: Maps GL -1 to 1 space to the actual screen aspect ratio
     const aspect = canvas.width / canvas.height;
     const bX = aspect > 1 ? aspect : 1.0;
     const bY = aspect < 1 ? 1.0/aspect : 1.0;
 
-    for(let p of particles) {
-        p.vx += g.x; p.vy += g.y;
-        p.x += p.vx; p.y += p.vy;
-        p.vx *= 0.97; p.vy *= 0.97; // Drag
+    for(let i=0; i<P_COUNT; i++) {
+        let p = particles[i];
+        
+        // 1. Gravity
+        p.vx += grav.x; p.vy += grav.y;
+        
+        // 2. Fluid Pressure (Repulsion) - Keeps it from being a solid ball
+        for(let j=i+1; j<P_COUNT; j++) {
+            let p2 = particles[j];
+            let dx = p2.x - p.x;
+            let dy = p2.y - p.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if(dist < SPACING) {
+                let force = (SPACING - dist) * 0.0005;
+                let fx = (dx / dist) * force;
+                let fy = (dy / dist) * force;
+                p.vx -= fx; p.vy -= fy;
+                p2.vx += fx; p2.vy += fy;
+            }
+        }
 
-        // HARD VIEWPORT BOUNDS (Collision)
-        // Adjust for particle radius so they don't clip through edges
-        const margin = p.r * 0.4;
-        if (p.x > bX - margin) { p.x = bX - margin; p.vx *= -0.5; }
-        if (p.x < -bX + margin) { p.x = -bX + margin; p.vx *= -0.5; }
-        if (p.y > bY - margin) { p.y = bY - margin; p.vy *= -0.5; }
-        if (p.y < -bY + margin) { p.y = -bY + margin; p.vy *= -0.5; }
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.96; p.vy *= 0.96; // Viscosity/Drag
+
+        // 3. Viewport Constraints
+        const margin = p.r * 0.3;
+        if (p.x > bX - margin) { p.x = bX - margin; p.vx *= -0.4; }
+        if (p.x < -bX + margin) { p.x = -bX + margin; p.vx *= -0.4; }
+        if (p.y > bY - margin) { p.y = bY - margin; p.vy *= -0.4; }
+        if (p.y < -bY + margin) { p.y = -bY + margin; p.vy *= -0.4; }
     }
 }
 
 window.addEventListener('deviceorientation', (e) => {
-    // Fixed inversion and sensitivity
     let pitch = e.beta * (Math.PI / 180);
     let roll = e.gamma * (Math.PI / 180);
-    g.x = Math.sin(roll) * 0.002;
-    g.y = -Math.sin(pitch) * 0.002;
+    // Dynamic gravity based on tilt
+    grav.x = Math.sin(roll) * 0.0015;
+    grav.y = -Math.sin(pitch) * 0.0015;
 });
 
 window.onclick = async () => {
     if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
         await DeviceOrientationEvent.requestPermission();
     }
-    document.getElementById('ui').style.display = 'none';
+    document.getElementById('tap').style.display = 'none';
 };
 
 function resize() {
