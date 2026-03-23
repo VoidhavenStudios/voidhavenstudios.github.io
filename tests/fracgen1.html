@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Rhalza's Fractal Gen v1.3.91</title>
+<title>Rhalza's Fractal Gen v1.3.92</title>
 <style>
 body { margin: 0; overflow: hidden; background: #000; touch-action: none; font-family: monospace; user-select: none; -webkit-user-select: none; }
 canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
@@ -61,6 +61,8 @@ let w, h;
 let resScale = 1.0;
 let accumTex = gl.createTexture();
 let accumFbo = gl.createFramebuffer();
+let frameCount = 0;
+let isMoving = false;
 
 function resize() {
     w = Math.floor(window.innerWidth * resScale);
@@ -335,9 +337,6 @@ const statsDisplay = document.getElementById('stats-display');
 const resBtn = document.getElementById('btn-res');
 const modalBg = document.getElementById('modal-bg');
 const dnaText = document.getElementById('dna-text');
-
-let isMoving = false;
-let frameCount = 0;
 
 function updateFormula() { 
     display.innerText = 'z = ' + astToMath(currentF.ast); 
