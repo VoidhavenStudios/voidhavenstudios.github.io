@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Rhalza's Fractal Gen v1.3.98</title>
+<title>Rhalza's Fractal Gen v1.3.99</title>
 <style>
 body { margin: 0; overflow: hidden; background: #000; touch-action: none; font-family: monospace; user-select: none; -webkit-user-select: none; }
 canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
@@ -129,10 +129,23 @@ onmessage = function(e) {
 
 const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2', { antialias: false, depth: false, preserveDrawingBuffer: true });
-if (!gl) document.body.innerHTML = '<h1 style="color:#f00;text-align:center;margin-top:20%">WebGL2 Required</h1>';
 
-gl.getExtension('EXT_color_buffer_float');
+// Safely halt if WebGL2 isn't supported
+if (!gl) {
+    document.body.innerHTML = '<h1 style="color:#f00;text-align:center;margin-top:20%">WebGL2 Required. Please update your browser.</h1>';
+    throw new Error("WebGL2 not supported on this device/browser.");
+}
+
+// Hardware Capability Checks (prevents screen flickering on lower-end devices)
+const extFloat = gl.getExtension('EXT_color_buffer_float');
+const extHalfFloat = gl.getExtension('EXT_color_buffer_half_float');
 const extParallel = gl.getExtension('KHR_parallel_shader_compile');
+
+// Determine the best accumulation buffer format based on device hardware
+const ACCUM_INTERNAL = extFloat ? gl.RGBA32F : (extHalfFloat ? gl.RGBA16F : gl.RGBA8);
+const ACCUM_TYPE = extFloat ? gl.FLOAT : (extHalfFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE);
+
+if(!extFloat) console.warn("32-bit float framebuffers not supported. Falling back to lower precision accumulation.");
 
 let w, h;
 let resScale = 1.0;
@@ -153,6 +166,8 @@ let compileWaitFrames = 0;
 
 let zoom = 1.0;
 let centerVirt = [0n, 0n], centerRef = [0n, 0n];
+
+// WebGL2 guarantees reading from 32-bit floats via RG32F is standard, so this is safe globally
 let refOrbitTex = [gl.createTexture(), gl.createTexture(), gl.createTexture(), gl.createTexture()];
 for(let i=0; i<4; i++) {
     gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[i]);
@@ -171,9 +186,18 @@ function resize() {
     gl.bindTexture(gl.TEXTURE_2D, accumTex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+    
+    // Safely define the texture using the verified hardware formats
+    gl.texImage2D(gl.TEXTURE_2D, 0, ACCUM_INTERNAL, w, h, 0, gl.RGBA, ACCUM_TYPE, null);
+    
     gl.bindFramebuffer(gl.FRAMEBUFFER, accumFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accumTex, 0);
+    
+    // Safety check ensuring the framebuffer actually built properly
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        console.error("Framebuffer initialization failed. Hardware may lack support.");
+    }
+    
     frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
 }
 window.addEventListener('resize', resize);
@@ -482,7 +506,6 @@ window.addEventListener('wheel', e => {
     window.wheelTimeout = setTimeout(() => { isMoving = false; }, 200);
 });
 
-// Mobile Multi-touch & Zoom Support
 let touchHasMoved = false;
 let initialTouchDist = 0, initialZoom = 1.0;
 
@@ -490,7 +513,7 @@ window.addEventListener('touchstart', e => {
     if (e.touches.length === 2) {
         initialTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
         initialZoom = zoom;
-        isDown = false; // Disable single finger pan while zooming
+        isDown = false; 
         touchHasMoved = true;
     } else if (e.touches.length === 1) {
         mouseX = e.touches[0].clientX; mouseY = e.touches[0].clientY;
@@ -509,7 +532,7 @@ window.addEventListener('touchmove', e => {
         e.preventDefault();
         let currentDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
         if (initialTouchDist > 0) {
-            zoom = initialZoom * (initialTouchDist / currentDist);
+            zoom = initialZoom * (currentDist / initialTouchDist); 
             frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
         }
     } else if (e.touches.length === 1 && isDown) {
@@ -645,7 +668,6 @@ function loop() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h); gl.disable(gl.BLEND);
     
-    // Safety check in case the HUD still fails to compile on an extremely strict driver
     if (gl.getProgramParameter(hudProg, gl.LINK_STATUS)) {
         gl.useProgram(hudProg); gl.bindVertexArray(vao);
         gl.uniform2f(hudLocs.res, w, h);
@@ -662,7 +684,6 @@ function loop() {
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     } else {
-        // Fallback pass to just render the fractal if the UI physically can't compile
         gl.useProgram(fullProg ? fullProg.prog : null); 
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
