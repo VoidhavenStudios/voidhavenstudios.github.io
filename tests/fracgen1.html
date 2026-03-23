@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Rhalza's Fractal Gen v1.3.96</title>
+<title>Rhalza's Fractal Gen v1.3.97</title>
 <style>
 body { margin: 0; overflow: hidden; background: #000; touch-action: none; font-family: monospace; user-select: none; -webkit-user-select: none; }
 canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
@@ -114,15 +114,18 @@ onmessage = function(e) {
         let C = [BigInt(e.data.cx), BigInt(e.data.cy)];
         let Z = [0n, 0n];
         let orbit = new Float32Array(e.data.iter * 2);
-        let maxR2 = 256n << (SCALE_BITS * 2n);
+        
+        // Correct scaling for bc_abs2!
+        let maxR2 = 256n << SCALE_BITS;
+        const scale_num = Math.pow(2, 120);
         
         for(let i=0; i<e.data.iter; i++) {
-            orbit[i*2] = Number(Z[0] >> 60n) / (2**60);
-            orbit[i*2+1] = Number(Z[1] >> 60n) / (2**60);
+            orbit[i*2] = Number(Z[0]) / scale_num;
+            orbit[i*2+1] = Number(Z[1]) / scale_num;
             if(bc_abs2(Z) > maxR2) break;
             Z = f(Z, C, bc_add, bc_sub, bc_mul, bc_sqr, bc_cube);
         }
-        postMessage({ cmd: 'REF_READY', orbit, idx: e.data.idx }, [orbit.buffer]);
+        postMessage({ cmd: 'REF_READY', orbit, idx: e.data.idx, reqCx: e.data.cx, reqCy: e.data.cy }, [orbit.buffer]);
     }
 };
 `;
@@ -148,7 +151,8 @@ let mode = 'FULL';
 let currentAst = { type: 'c_add', left: { type: 'c_sqr', arg: { type: 'var', val: 'z' } }, right: { type: 'var', val: 'c' } };
 let gridAsts = [];
 let fullProg = null, gridProgs = [null, null, null, null];
-let isCompiling = false, isComputingRef = false;
+let isEvolving = false, isCompiling = false, isComputingRef = false;
+let pendingProgs = [];
 
 let zoom = 1.0;
 let centerVirt = [0n, 0n], centerRef = [0n, 0n];
@@ -160,8 +164,13 @@ for(let i=0; i<4; i++) {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 256, 256, 0, gl.RG, gl.FLOAT, new Float32Array(256*256*2));
 }
 
-const SCALE_BITS = 120n;
-const SCALE = 1n << SCALE_BITS;
+const zeroOrbit = new Float32Array(256 * 256 * 2);
+function clearOrbits() {
+    for(let i=0; i<4; i++) {
+        gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[i]);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, zeroOrbit);
+    }
+}
 
 function resize() {
     w = Math.floor(window.innerWidth * resScale * window.devicePixelRatio);
@@ -186,7 +195,7 @@ function compileGLSL(ast) {
     function tr(n) {
         let myId = id++;
         if(n.type === 'var') {
-            if(n.val === 'z') code += `vec2 r_${myId}=Xn; vec2 d_${myId}=z; vec2 dz_${myId}=dz;\n`;
+            if(n.val === 'z') code += `vec2 r_${myId}=Xn; vec2 d_${myId}=z_in; vec2 dz_${myId}=dz_in;\n`;
             else code += `vec2 r_${myId}=u_center; vec2 d_${myId}=c; vec2 dz_${myId}=vec2(1.0,0.0);\n`;
         } else if(n.type === 'c_sqr') {
             let a = tr(n.arg);
@@ -233,7 +242,7 @@ vec2 c_mul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); 
 vec2 c_sqr(vec2 a) { return vec2(a.x*a.x - a.y*a.y, 2.0*a.x*a.y); }
 vec2 c_cube(vec2 a) { return c_mul(c_sqr(a), a); }
 
-void evalAST(vec2 Xn, vec2 z, vec2 c, vec2 dz, out vec2 out_z, out vec2 out_dz, out vec2 out_full) {
+void evalAST(vec2 Xn, vec2 z_in, vec2 c, vec2 dz_in, out vec2 out_z, out vec2 out_dz, out vec2 out_full) {
     _MATH_
 }
 
@@ -247,7 +256,12 @@ void main() {
             if(count >= u_iter) break;
             ivec2 t_uv = ivec2(count % 256, count / 256);
             vec2 Xn = texelFetch(u_ref_tex, t_uv, 0).xy;
-            evalAST(Xn, z, c, dz, z, dz, z_full);
+            
+            // Temporary block variables to prevent in/out GLSL aliasing failure
+            vec2 nz, ndz;
+            evalAST(Xn, z, c, dz, nz, ndz, z_full);
+            z = nz; dz = ndz;
+            
             r2 = dot(z_full, z_full);
             if(r2 > 256.0) break;
             count++;
@@ -262,7 +276,7 @@ void main() {
     float de = 0.5 * r * log(r) / (dr + 1e-15);
     float de_px = de * u_res.y / u_span;
     float edge = clamp(1.2 - de_px, 0.0, 1.0);
-    float sn = float(count) - log2(log2(r2)/2.0) + 4.0;
+    float sn = float(count) - log2(max(log2(max(r2, 256.0))/2.0, 1e-8)) + 4.0;
     vec3 col = 0.5 + 0.5 * cos(3.0 + sn * 0.15 + u_color);
     fragColor = vec4(col * (edge + 0.6 * exp(-de_px * 0.08)), u_alpha);
 }`;
@@ -272,15 +286,17 @@ function buildProgram(ast) {
     let vs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(vs, vsSource); gl.compileShader(vs);
     let fs = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(fs, fsTemplate.replace('_MATH_', compileGLSL(ast))); gl.compileShader(fs);
     gl.attachShader(p, vs); gl.attachShader(p, fs); gl.bindAttribLocation(p, 0, 'position'); gl.linkProgram(p);
-    return {
-        prog: p, col: [Math.random()*6, Math.random()*6, Math.random()*6],
-        locs: {
-            res: gl.getUniformLocation(p, 'u_res'), center: gl.getUniformLocation(p, 'u_center'),
-            dc_off: gl.getUniformLocation(p, 'u_dc_offset'), span: gl.getUniformLocation(p, 'u_span'),
-            iter: gl.getUniformLocation(p, 'u_iter'), col: gl.getUniformLocation(p, 'u_color'),
-            jit: gl.getUniformLocation(p, 'u_jitter'), alpha: gl.getUniformLocation(p, 'u_alpha'),
-            ref: gl.getUniformLocation(p, 'u_ref_tex')
-        }
+    return { prog: p, col: [Math.random()*6, Math.random()*6, Math.random()*6], locs: {} };
+}
+
+function extractLocations(p) {
+    if(!p.prog) return;
+    p.locs = {
+        res: gl.getUniformLocation(p.prog, 'u_res'), center: gl.getUniformLocation(p.prog, 'u_center'),
+        dc_off: gl.getUniformLocation(p.prog, 'u_dc_offset'), span: gl.getUniformLocation(p.prog, 'u_span'),
+        iter: gl.getUniformLocation(p.prog, 'u_iter'), col: gl.getUniformLocation(p.prog, 'u_color'),
+        jit: gl.getUniformLocation(p.prog, 'u_jitter'), alpha: gl.getUniformLocation(p.prog, 'u_alpha'),
+        ref: gl.getUniformLocation(p.prog, 'u_ref_tex')
     };
 }
 
@@ -288,9 +304,6 @@ const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
 const qbuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, qbuf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-const fM = {' ':0,'!':9346,'"':24576,'#':31725,'$':14827,'%':21845,'&':15663,'\'':8192,'(':10530,')':8770,'*':2728,'+':5504,',':2,'-':448,'.':2,'/':4368,'0':31599,'1':9362,'2':29671,'3':29391,'4':23497,'5':31183,'6':31215,'7':29257,'8':31727,'9':31695,':':1040,';':1042,'<':5904,'=':3640,'>':17424,'?':10608,'@':31725,'A':31725,'B':14827,'C':15663,'D':14815,'E':31143,'F':31140,'G':15855,'H':23533,'I':29847,'J':9455,'K':23465,'L':18735,'M':23277,'N':23501,'O':31599,'P':31716,'Q':31603,'R':31721,'S':31183,'T':29842,'U':23535,'V':23402,'W':23533,'X':23469,'Y':23466,'Z':29671};
-let fA = []; for(let i=32; i<=90; i++) fA.push(fM[String.fromCharCode(i)]||0);
 
 const hudFs = `#version 300 es
 precision highp float; precision highp int;
@@ -302,7 +315,7 @@ uniform int u_txt2[64]; uniform int u_len2;
 uniform vec4 u_btns[4]; uniform int u_hvr[4];
 uniform int u_txt_btn[24]; uniform int u_b_lens[4];
 
-uint font[59] = uint[](
+uint font[59] = uint[59](
     0u, 9346u, 24576u, 31725u, 14827u, 21845u, 15663u, 8192u, 10530u, 8770u, 2728u, 5504u, 2u, 448u, 2u, 4368u,
     31599u, 9362u, 29671u, 29391u, 23497u, 31183u, 31215u, 29257u, 31727u, 31695u,
     1040u, 1042u, 5904u, 3640u, 17424u, 10608u, 31725u,
@@ -311,7 +324,7 @@ uint font[59] = uint[](
 
 float sdBox(vec2 p, vec2 b) { vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
 
-float textSDF(vec2 p, vec2 pos, float scale, int[] txt, int len) {
+float textSDF(vec2 p, vec2 pos, float scale, int txt[64], int len) {
     vec2 up = (p - pos) / scale;
     if(up.x < 0.0 || up.y < 0.0 || up.y > 1.0 || up.x > float(len)) return 1.0;
     int idx = int(up.x); int ascii = txt[idx];
@@ -402,22 +415,29 @@ function updateUI() {
     }
 }
 
-let pendingProgs = [];
 function kickEvolve(cmd, dna=null) {
-    isCompiling = true; needsPreview = true;
+    isEvolving = true; needsPreview = true;
     worker.postMessage({ cmd: cmd, baseAst: currentAst, asts: dna });
 }
 worker.onmessage = function(e) {
     if(e.data.cmd === 'AST_READY') {
         gridAsts = e.data.asts;
+        let oldProgs = gridProgs;
         gridProgs = gridAsts.map(buildProgram);
-        pendingProgs = gridProgs;
+        pendingProgs = [...gridProgs];
+        
+        oldProgs.forEach(p => { if(p && p !== fullProg) gl.deleteProgram(p.prog); });
+        
+        isEvolving = false;
+        isCompiling = true;
     } else if(e.data.cmd === 'REF_READY') {
         gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[e.data.idx]);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, e.data.orbit);
         isComputingRef = false;
         frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
-        centerRef = [...centerVirt];
+        // Vital mapping: ensure the Reference mathematically pairs with the coordinates used to calculate it!
+        centerRef[0] = BigInt(e.data.reqCx);
+        centerRef[1] = BigInt(e.data.reqCy);
     }
 };
 
@@ -453,7 +473,7 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('mousedown', e => {
     isDown = true; lastP = { x: mouseX, y: mouseY };
     if(btnHvr[0]) handleEvolve(); else if(btnHvr[1]) handleRandom(); else if(btnHvr[2]) handleDNA(); else if(btnHvr[3]) handleRes();
-    else if(mode === 'GRID' && !isCompiling) {
+    else if(mode === 'GRID' && !isCompiling && !isEvolving) {
         let idx = (mouseX > window.innerWidth/2 ? 1 : 0) + (mouseY > window.innerHeight/2 ? 2 : 0);
         fullProg = gridProgs[idx]; currentAst = gridAsts[idx];
         zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; mode = 'FULL';
@@ -462,7 +482,7 @@ window.addEventListener('mousedown', e => {
 });
 window.addEventListener('mouseup', () => { isDown = false; isMoving = false; });
 window.addEventListener('wheel', e => {
-    if(mode !== 'FULL' || isCompiling) return;
+    if(mode !== 'FULL' || isCompiling || isEvolving) return;
     zoom *= Math.pow(0.998, e.deltaY);
     frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
     clearTimeout(window.wheelTimeout);
@@ -488,7 +508,7 @@ window.addEventListener('touchmove', e => {
 window.addEventListener('touchend', e => {
     isDown = false; isMoving = false;
     if(btnHvr[0]) handleEvolve(); else if(btnHvr[1]) handleRandom(); else if(btnHvr[2]) handleDNA(); else if(btnHvr[3]) handleRes();
-    else if(mode === 'GRID' && !isCompiling) {
+    else if(mode === 'GRID' && !isCompiling && !isEvolving) {
         let idx = (mouseX > window.innerWidth/2 ? 1 : 0) + (mouseY > window.innerHeight/2 ? 2 : 0);
         fullProg = gridProgs[idx]; currentAst = gridAsts[idx];
         zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; mode = 'FULL';
@@ -503,6 +523,7 @@ function reqOrbit(ast, idx) {
 }
 
 function renderShader(p, view, alpha, jx, jy, maxIter, span, dcX, dcY, refIdx) {
+    if(!p || !p.prog) return;
     gl.viewport(view[0], view[1], view[2], view[3]);
     gl.useProgram(p.prog); gl.bindVertexArray(vao);
     gl.uniform2f(p.locs.res, view[2], view[3]);
@@ -519,10 +540,19 @@ function renderShader(p, view, alpha, jx, jy, maxIter, span, dcX, dcY, refIdx) {
 
 function loop() {
     updateUI();
-    if(isCompiling) {
+    
+    // Check parallel extension purely without evaluating before AST response
+    if(isCompiling && pendingProgs.length > 0) {
         let done = true;
         if(extParallel) done = pendingProgs.every(p => gl.getProgramParameter(p.prog, extParallel.COMPLETION_STATUS_KHR));
-        if(done) { isCompiling = false; mode = 'GRID'; frameCount = 0; tileIdx = 0; zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; }
+        if(done) { 
+            pendingProgs.forEach(extractLocations);
+            isCompiling = false; 
+            mode = 'GRID'; 
+            frameCount = 0; tileIdx = 0; zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; 
+            pendingProgs = [];
+            clearOrbits(); // Flush reference orbits so grid preview renders using root coordinate
+        }
     }
     
     if(mode === 'FULL' && !isMoving && !isComputingRef && (centerVirt[0] !== centerRef[0] || centerVirt[1] !== centerRef[1])) reqOrbit(currentAst, 0);
@@ -537,7 +567,7 @@ function loop() {
     else { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
 
     if(mode === 'FULL' && fullProg) {
-        if(isMoving || isCompiling || isComputingRef) {
+        if(isMoving || isCompiling || isEvolving || isComputingRef) {
             gl.disable(gl.SCISSOR_TEST);
             renderShader(fullProg, [0, 0, w, h], 1.0, 0, 0, 200, span, dcX, dcY, 0);
             needsPreview = false; lastMoveTime = performance.now();
@@ -553,7 +583,7 @@ function loop() {
             gl.disable(gl.SCISSOR_TEST);
             tileIdx++; if(tileIdx >= gridTilesX * gridTilesY) { tileIdx = 0; frameCount++; }
         }
-    } else if(mode === 'GRID' && !isCompiling) {
+    } else if(mode === 'GRID' && !isCompiling && !isEvolving && gridProgs[0]) {
         gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND);
         let hw = Math.floor(w/2), hh = Math.floor(h/2);
         renderShader(gridProgs[0], [0, hh, hw, h-hh], 1.0, 0, 0, 150, 4.0, 0, 0, 0);
@@ -569,11 +599,14 @@ function loop() {
     gl.uniform4fv(hudLocs.btns, btnRects); gl.uniform1iv(hudLocs.hvr, btnHvr);
     gl.uniform1iv(hudLocs.txt_btn, btnTxt); gl.uniform1iv(hudLocs.b_lens, btnLens);
     
-    let fStr = isCompiling ? "EVOLVING MUTATIONS..." : (isComputingRef ? "CALCULATING ORBIT..." : "Z = " + astToStr(currentAst));
-    fillStr(fStr, strArr1); gl.uniform1iv(hudLocs.txt1, strArr1); gl.uniform1i(hudLocs.len1, fStr.length);
+    let astStr = "Z = " + astToStr(currentAst);
+    if(astStr.length > 61) astStr = astStr.substring(0, 61) + "...";
+    
+    let fStr = isEvolving ? "EVOLVING MUTATIONS..." : (isCompiling ? "COMPILING SHADERS..." : (isComputingRef ? "CALCULATING ORBIT..." : astStr));
+    fillStr(fStr, strArr1); gl.uniform1iv(hudLocs.txt1, strArr1); gl.uniform1i(hudLocs.len1, Math.min(fStr.length, 64));
     
     let sStr = mode === 'FULL' ? `ZOOM: 1e${Math.max(0, Math.log10(zoom)).toFixed(1)} | DE LIMIT: ${iter} | SAMPLES: ${isMoving ? 0 : frameCount}` : "";
-    fillStr(sStr, strArr2); gl.uniform1iv(hudLocs.txt2, strArr2); gl.uniform1i(hudLocs.len2, mode==='FULL' ? sStr.length : -1);
+    fillStr(sStr, strArr2); gl.uniform1iv(hudLocs.txt2, strArr2); gl.uniform1i(hudLocs.len2, mode==='FULL' ? Math.min(sStr.length, 64) : -1);
     
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
