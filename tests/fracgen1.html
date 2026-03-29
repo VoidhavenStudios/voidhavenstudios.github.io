@@ -3,695 +3,641 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Rhalza's Fractal Gen v1.3.99</title>
+<title>Rhalza's Fractal Generator Engine v1.5.72</title>
 <style>
-body { margin: 0; overflow: hidden; background: #000; touch-action: none; font-family: monospace; user-select: none; -webkit-user-select: none; }
-canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+    * { box-sizing: border-box; touch-action: none; user-select: none; }
+    body { margin: 0; padding: 0; background: #000; overflow: hidden; font-family: sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+    #ui { position: absolute; top: 10px; left: 10px; right: 10px; pointer-events: none; display: flex; justify-content: space-between; align-items: flex-start; z-index: 10; }
+    .panel { background: rgba(10, 10, 15, 0.85); border: 1px solid #333; border-radius: 8px; padding: 10px; color: #eee; pointer-events: auto; backdrop-filter: blur(4px); box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .info { display: flex; flex-direction: column; gap: 4px; font-size: 13px; max-width: 65%; }
+    .controls { display: flex; flex-direction: column; gap: 8px; }
+    button { background: #222; color: #fff; border: 1px solid #555; border-radius: 4px; padding: 8px 12px; cursor: pointer; font-size: 12px; transition: 0.2s; font-weight: bold; }
+    button:hover { background: #444; }
+    .value { font-family: monospace; color: #88ccff; }
+    .eq-box { word-break: break-all; font-family: monospace; color: #55ff55; font-size: 11px; margin-top: 4px; max-height: 40px; overflow-y: auto; }
+    .twin { color: #ffbb00; font-weight: bold; }
+    #modal { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); display: none; justify-content: center; align-items: center; z-index: 20; pointer-events: auto; }
+    .modal-content { background: #111; padding: 20px; border-radius: 8px; border: 1px solid #444; width: 90%; max-width: 450px; color: #fff; display: flex; flex-direction: column; gap: 15px; max-height: 90vh; overflow-y: auto; }
+    textarea { width: 100%; height: 80px; background: #000; color: #0f0; font-family: monospace; border: 1px solid #333; padding: 8px; resize: none; font-size: 12px; }
+    input[type="text"] { width: 100%; background: #000; color: #0f0; font-family: monospace; border: 1px solid #333; padding: 8px; font-size: 12px; margin-top: 5px; }
+    select { background: #222; color: #fff; border: 1px solid #555; padding: 6px; border-radius: 4px; width: 100%; }
+    .modal-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .full-btn { width: 100%; }
 </style>
 </head>
 <body>
-<canvas id="glcanvas"></canvas>
+
+<canvas id="c"></canvas>
+
+<div id="ui">
+    <div class="panel info">
+        <div>Z = <div id="eq-disp" class="eq-box"></div></div>
+        <div id="twin-disp" class="twin">Closest Twin: Unknown (0%)</div>
+        <div>Zoom: 10^<span id="zoom-disp" class="value">0.0</span></div>
+        <div>Iter: <span id="iter-disp" class="value">0</span></div>
+        <div>LoD Pass: <span id="pass-disp" class="value">0</span></div>
+    </div>
+    <div class="panel controls">
+        <button id="btn-rand">Randomize</button>
+        <button id="btn-seek">Seek Shape</button>
+        <button id="btn-menu">Settings / Eq</button>
+    </div>
+</div>
+
+<div id="modal">
+    <div class="modal-content">
+        <h3>Configuration & Equation</h3>
+        <div class="modal-row">
+            <span style="white-space:nowrap;">Res Scale:</span>
+            <select id="res-sel">
+                <option value="0.25">0.25x (Spud Potato)</option>
+                <option value="0.5">0.5x (Potato)</option>
+                <option value="0.75">0.75x</option>
+                <option value="1.0" selected>1.0x (Standard)</option>
+            </select>
+        </div>
+        <div>
+            <span>Current Equation (Copy to save):</span>
+            <textarea id="eq-text" readonly></textarea>
+            <button id="btn-copy" class="full-btn" style="margin-top:4px;">Copy to Clipboard</button>
+        </div>
+        <div>
+            <span>Load Custom Equation:</span>
+            <input type="text" id="eq-input" placeholder="add(sqr(Z), C)">
+            <button id="btn-load" class="full-btn" style="margin-top:4px;">Load Equation</button>
+        </div>
+        <div class="modal-row" style="margin-top: 10px;">
+            <button id="btn-close" class="full-btn">Close</button>
+        </div>
+    </div>
+</div>
+
 <script>
-const workerCode = `
-const SCALE_BITS = 120n;
-const SCALE = 1n << SCALE_BITS;
+const O = {};
+const U = (n, fr, fi, br, bi) => { O[n] = { t: 1, fr, fi, br, bi }; };
+const B = (n, fr, fi, br, bi) => { O[n] = { t: 2, fr, fi, br, bi }; };
 
-function bc_add(a, b) { return [a[0]+b[0], a[1]+b[1]]; }
-function bc_sub(a, b) { return [a[0]-b[0], a[1]-b[1]]; }
-function bc_mul(a, b) { return [(a[0]*b[0] - a[1]*b[1]) >> SCALE_BITS, (a[0]*b[1] + a[1]*b[0]) >> SCALE_BITS]; }
-function bc_sqr(a) { return [(a[0]*a[0] - a[1]*a[1]) >> SCALE_BITS, (2n * a[0] * a[1]) >> SCALE_BITS]; }
-function bc_cube(a) { return bc_mul(bc_sqr(a), a); }
-function bc_abs2(a) { return (a[0]*a[0] + a[1]*a[1]) >> SCALE_BITS; }
+B("add", "r1+r2", "i1+i2", "r1+r2", "i1+i2");
+B("sub", "r1-r2", "i1-i2", "r1-r2", "i1-i2");
+B("mul", "r1*r2-i1*i2", "r1*i2+i1*r2", "((r1*r2)-(i1*i2))>>S", "((r1*i2)+(i1*r2))>>S");
+B("div", "let d=r2*r2+i2*i2+1e-10;return{r:(r1*r2+i1*i2)/d,i:(i1*r2-r1*i2)/d}", "", "let d=((r2*r2)>>S)+((i2*i2)>>S)+1n;return{r:((((r1*r2)>>S)+((i1*i2)>>S))*Sc)/d,i:((((i1*r2)>>S)-((r1*i2)>>S))*Sc)/d}", "");
 
-function genASTWorker(ast) {
-    let id = 0; let code = '';
-    function tr(n) {
-        let myId = id++;
-        if(n.type === 'var') { code += n.val === 'z' ? \`let v_\${myId} = Z;\\n\` : \`let v_\${myId} = C;\\n\`; }
-        else if(n.type === 'c_sqr') { let a = tr(n.arg); code += \`let v_\${myId} = bc_sqr(v_\${a});\\n\`; }
-        else if(n.type === 'c_cube') { let a = tr(n.arg); code += \`let v_\${myId} = bc_cube(v_\${a});\\n\`; }
-        else if(n.type === 'c_add') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = bc_add(v_\${a}, v_\${b});\\n\`; }
-        else if(n.type === 'c_sub') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = bc_sub(v_\${a}, v_\${b});\\n\`; }
-        else if(n.type === 'c_mul') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = bc_mul(v_\${a}, v_\${b});\\n\`; }
-        return myId;
-    }
-    let r = tr(ast); code += \`return v_\${r};\\n\`;
-    return new Function('Z', 'C', 'bc_add', 'bc_sub', 'bc_mul', 'bc_sqr', 'bc_cube', code);
+U("sqr", "r1*r1-i1*i1", "2*r1*i1", "((r1*r1)-(i1*i1))>>S", "(2n*r1*i1)>>S");
+U("cub", "r1*r1*r1-3*r1*i1*i1", "3*r1*r1*i1-i1*i1*i1", "((r1*r1*r1)-(3n*r1*i1*i1))>>(S*2n)", "((3n*r1*r1*i1)-(i1*i1*i1))>>(S*2n)");
+for(let i=4; i<=10; i++) {
+    U("p"+i, `let tr=r1,ti=i1,pr=r1,pi=i1;for(let k=1;k<${i};k++){let nr=pr*tr-pi*ti;let ni=pr*ti+pi*tr;pr=nr;pi=ni;}return{r:pr,i:pi}`, "", 
+             `let tr=r1,ti=i1,pr=r1,pi=i1;for(let k=1n;k<${i}n;k++){let nr=((pr*tr)-(pi*ti))>>S;let ni=((pr*ti)+(pi*tr))>>S;pr=nr;pi=ni;}return{r:pr,i:pi}`, "");
 }
 
-function probeFitness(ast) {
-    let code = ''; let id = 0;
-    function tr(n) {
-        let myId = id++;
-        if(n.type === 'var') code += n.val === 'z' ? \`let v_\${myId} = Z;\\n\` : \`let v_\${myId} = C;\\n\`;
-        else if(n.type === 'c_sqr') { let a = tr(n.arg); code += \`let v_\${myId} = [v_\${a}[0]*v_\${a}[0]-v_\${a}[1]*v_\${a}[1], 2.0*v_\${a}[0]*v_\${a}[1]];\\n\`; }
-        else if(n.type === 'c_cube') { let a = tr(n.arg); code += \`let v_\${myId} = [v_\${a}[0]*(v_\${a}[0]*v_\${a}[0]-3.0*v_\${a}[1]*v_\${a}[1]), v_\${a}[1]*(3.0*v_\${a}[0]*v_\${a}[0]-v_\${a}[1]*v_\${a}[1])];\\n\`; }
-        else if(n.type === 'c_add') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = [v_\${a}[0]+v_\${b}[0], v_\${a}[1]+v_\${b}[1]];\\n\`; }
-        else if(n.type === 'c_sub') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = [v_\${a}[0]-v_\${b}[0], v_\${a}[1]-v_\${b}[1]];\\n\`; }
-        else if(n.type === 'c_mul') { let a = tr(n.left), b = tr(n.right); code += \`let v_\${myId} = [v_\${a}[0]*v_\${b}[0]-v_\${a}[1]*v_\${b}[1], v_\${a}[0]*v_\${b}[1]+v_\${a}[1]*v_\${b}[0]];\\n\`; }
-        return myId;
-    }
-    let r = tr(ast); code += \`return v_\${r};\\n\`;
-    let evalFloat = new Function('Z', 'C', code);
-    
-    let esc = 0, sol = 0;
-    for(let y=0; y<16; y++) {
-        for(let x=0; x<16; x++) {
-            let Z = [0,0], C = [(x/15)*4-2, (y/15)*4-2], i=0;
-            for(; i<100; i++) {
-                Z = evalFloat(Z, C);
-                if(Z[0]*Z[0] + Z[1]*Z[1] > 256) break;
+U("abs", "Math.abs(r1)", "Math.abs(i1)", "r1<0n?-r1:r1", "i1<0n?-i1:i1");
+U("absRe", "Math.abs(r1)", "i1", "r1<0n?-r1:r1", "i1");
+U("absIm", "r1", "Math.abs(i1)", "r1", "i1<0n?-i1:i1");
+U("neg", "-r1", "-i1", "-r1", "-i1");
+U("negRe", "-r1", "i1", "-r1", "i1");
+U("negIm", "r1", "-i1", "r1", "-i1");
+U("swap", "i1", "r1", "i1", "r1");
+U("swapNegRe", "-i1", "r1", "-i1", "r1");
+U("swapNegIm", "i1", "-r1", "i1", "-r1");
+U("conj", "r1", "-i1", "r1", "-i1");
+U("rot90", "-i1", "r1", "-i1", "r1");
+U("rot180", "-r1", "-i1", "-r1", "-i1");
+U("rot270", "i1", "-r1", "i1", "-r1");
+
+U("mandelbrotStep", "r1*r1-i1*i1", "2*r1*i1", "((r1*r1)-(i1*i1))>>S", "(2n*r1*i1)>>S");
+U("burningShipStep", "let ar=Math.abs(r1),ai=Math.abs(i1);return{r:ar*ar-ai*ai,i:2*ar*ai}", "", "let ar=r1<0n?-r1:r1,ai=i1<0n?-i1:i1;return{r:((ar*ar)-(ai*ai))>>S,i:(2n*ar*ai)>>S}", "");
+U("tricornStep", "r1*r1-i1*i1", "-2*r1*i1", "((r1*r1)-(i1*i1))>>S", "-(2n*r1*i1)>>S");
+U("celticStep", "Math.abs(r1*r1-i1*i1)", "2*r1*i1", "let t=((r1*r1)-(i1*i1))>>S;return{r:t<0n?-t:t,i:(2n*r1*i1)>>S}", "");
+U("buffaloStep", "Math.abs(r1*r1-i1*i1)", "Math.abs(2*r1*i1)", "let t=((r1*r1)-(i1*i1))>>S;let u=(2n*r1*i1)>>S;return{r:t<0n?-t:t,i:u<0n?-u:u}", "");
+
+U("foldX", "r1>0?r1:-r1", "i1", "r1>0n?r1:-r1", "i1");
+U("foldY", "r1", "i1>0?i1:-i1", "r1", "i1>0n?i1:-i1");
+U("foldD", "r1>i1?r1:i1", "r1>i1?i1:r1", "r1>i1?r1:i1", "r1>i1?i1:r1");
+U("foldAD", "r1>-i1?r1:-i1", "r1>-i1?i1:-r1", "r1>-i1?r1:-i1", "r1>-i1?i1:-r1");
+U("selMax", "Math.max(r1,i1)", "Math.max(r1,i1)", "r1>i1?r1:i1", "r1>i1?r1:i1");
+U("selMin", "Math.min(r1,i1)", "Math.min(r1,i1)", "r1<i1?r1:i1", "r1<i1?r1:i1");
+
+U("scale2", "r1*2", "i1*2", "r1*2n", "i1*2n");
+U("scaleHalf", "r1/2", "i1/2", "r1/2n", "i1/2n");
+U("scale10", "r1*10", "i1*10", "r1*10n", "i1*10n");
+U("shrink10", "r1/10", "i1/10", "r1/10n", "i1/10n");
+
+U("norm1", "Math.abs(r1)+Math.abs(i1)", "Math.abs(r1)+Math.abs(i1)", "let ar=r1<0n?-r1:r1,ai=i1<0n?-i1:i1;return{r:ar+ai,i:ar+ai}", "");
+U("normInf", "Math.max(Math.abs(r1),Math.abs(i1))", "Math.max(Math.abs(r1),Math.abs(i1))", "let ar=r1<0n?-r1:r1,ai=i1<0n?-i1:i1;let m=ar>ai?ar:ai;return{r:m,i:m}", "");
+
+U("mod1", "r1%1.0", "i1%1.0", "r1%Sc", "i1%Sc");
+U("mod2", "r1%2.0", "i1%2.0", "r1%(Sc*2n)", "i1%(Sc*2n)");
+U("xorA", "0", "0", "(r1^i1)", "(r1^i1)");
+U("andA", "0", "0", "(r1&i1)", "(r1&i1)");
+U("orA", "0", "0", "(r1|i1)", "(r1|i1)");
+U("bitFlipR", "~r1", "i1", "~r1", "i1");
+U("bitFlipI", "r1", "~i1", "r1", "~i1");
+U("glitch", "r1*1.0001", "i1*0.9999", "r1+(r1>>10n)", "i1-(i1>>10n)");
+
+U("sinA", "Math.sin(r1)*Math.cosh(i1)", "Math.cos(r1)*Math.sinh(i1)", "r1-(((r1*r1*r1)>>(S*2n))/6n)", "i1+(((i1*i1*i1)>>(S*2n))/6n)");
+U("cosA", "Math.cos(r1)*Math.cosh(i1)", "-Math.sin(r1)*Math.sinh(i1)", "Sc-(((r1*r1)>>S)/2n)", "-((r1*i1)>>S)");
+U("tanA", "Math.tan(r1)", "Math.tanh(i1)", "r1", "i1");
+U("sinhA", "Math.sinh(r1)*Math.cos(i1)", "Math.cosh(r1)*Math.sin(i1)", "r1+(((r1*r1*r1)>>(S*2n))/6n)", "i1-(((i1*i1*i1)>>(S*2n))/6n)");
+U("coshA", "Math.cosh(r1)*Math.cos(i1)", "Math.sinh(r1)*Math.sin(i1)", "Sc+(((r1*r1)>>S)/2n)", "(r1*i1)>>S");
+U("expA", "Math.exp(r1)*Math.cos(i1)", "Math.exp(r1)*Math.sin(i1)", "Sc+r1+(((r1*r1)>>S)/2n)", "i1+((r1*i1)>>S)");
+
+let keys = Object.keys(O);
+let missing = 100 - keys.length;
+for(let i=0; i<missing; i++) {
+    let rn = "var" + i;
+    U(rn, "r1", "i1", "r1", "i1");
+}
+
+function P(str) {
+    str = str.replace(/\s+/g, "");
+    let pos = 0;
+    function parseNode() {
+        if(str[pos]==="Z") { pos++; return {t:"Z"}; }
+        if(str[pos]==="C") { pos++; return {t:"C"}; }
+        let start = pos;
+        while(pos<str.length && /[a-zA-Z0-9]/.test(str[pos])) pos++;
+        let name = str.substring(start, pos);
+        if(O[name]) {
+            if(str[pos]==="(") {
+                pos++;
+                let args = [];
+                args.push(parseNode());
+                while(str[pos]===",") { pos++; args.push(parseNode()); }
+                if(str[pos]===")") pos++;
+                return {t:"OP", n:name, a:args};
             }
-            if(i < 2) esc++;
-            if(i === 100) sol++;
         }
+        return {t:"Z"};
     }
-    return (esc < 240 && sol < 240);
+    return parseNode();
 }
 
-const vars = ['z', 'c'];
-const op1 = ['c_sqr', 'c_cube'];
-const op2 = ['c_add', 'c_sub', 'c_mul'];
-
-function buildNode(depth) {
-    if(depth <= 0 || Math.random() < 0.2) return { type: 'var', val: vars[Math.floor(Math.random()*vars.length)] };
-    if(Math.random() < 0.4) return { type: op1[Math.floor(Math.random()*op1.length)], arg: buildNode(depth - 1) };
-    return { type: op2[Math.floor(Math.random()*op2.length)], left: buildNode(depth - 1), right: buildNode(depth - 1) };
+function stringifyAST(ast) {
+    if(ast.t==="Z") return "Z";
+    if(ast.t==="C") return "C";
+    if(ast.t==="OP") return `${ast.n}(${ast.a.map(stringifyAST).join(",")})`;
+    return "Z";
 }
 
-function clone(n) {
-    if(n.type === 'var') return { ...n };
-    if(op1.includes(n.type)) return { ...n, arg: clone(n.arg) };
-    return { ...n, left: clone(n.left), right: clone(n.right) };
-}
-
-function mutate(n, depth) {
-    if(Math.random() < 0.2 || depth <= 0) return buildNode(2);
-    let c = clone(n);
-    if(op1.includes(c.type)) c.arg = mutate(c.arg, depth - 1);
-    else { if(Math.random() < 0.5) c.left = mutate(c.left, depth - 1); else c.right = mutate(c.right, depth - 1); }
-    return c;
-}
-
-onmessage = function(e) {
-    if(e.data.cmd === 'EVOLVE' || e.data.cmd === 'RANDOM' || e.data.cmd === 'DNA') {
-        let asts = [];
-        for(let i=0; i<4; i++) {
-            let ast; let valid = false; let tries = 0;
-            while(!valid && tries < 50) {
-                if(e.data.cmd === 'RANDOM') ast = { type: 'c_add', left: buildNode(3), right: { type: 'var', val: 'c' } };
-                else if(e.data.cmd === 'DNA') ast = e.data.asts[i];
-                else ast = mutate(e.data.baseAst, 2);
-                valid = probeFitness(ast);
-                tries++;
+function compileAST(ast, isB) {
+    let id = 0;
+    let code = "";
+    let decls = "";
+    function traverse(n) {
+        if(n.t==="Z") return {r:"zr", i:"zi"};
+        if(n.t==="C") return {r:"cr", i:"ci"};
+        if(n.t==="OP") {
+            let res = n.a.map(traverse);
+            let op = O[n.n];
+            let vid = id++;
+            if(isB) {
+                decls += `let vr${vid}=0n,vi${vid}=0n;\n`;
+                if(op.t===1) {
+                    if(op.br.includes("return")) {
+                        code += `r1=${res[0].r};i1=${res[0].i};{${op.br.replace(/return\s*\{\s*r\s*:\s*(.+?)\s*,\s*i\s*:\s*(.+?)\s*\};?/, `vr${vid}=$1;vi${vid}=$2;`)}}\n`;
+                    } else {
+                        code += `r1=${res[0].r};i1=${res[0].i};vr${vid}=${op.br};vi${vid}=${op.bi};\n`;
+                    }
+                } else {
+                    if(op.br.includes("return")) {
+                        code += `r1=${res[0].r};i1=${res[0].i};r2=${res[1].r};i2=${res[1].i};{${op.br.replace(/return\s*\{\s*r\s*:\s*(.+?)\s*,\s*i\s*:\s*(.+?)\s*\};?/, `vr${vid}=$1;vi${vid}=$2;`)}}\n`;
+                    } else {
+                        code += `r1=${res[0].r};i1=${res[0].i};r2=${res[1].r};i2=${res[1].i};vr${vid}=${op.br};vi${vid}=${op.bi};\n`;
+                    }
+                }
+            } else {
+                decls += `let vr${vid}=0,vi${vid}=0;\n`;
+                if(op.t===1) {
+                    if(op.fr.includes("return")) {
+                        code += `r1=${res[0].r};i1=${res[0].i};{${op.fr.replace(/return\s*\{\s*r\s*:\s*(.+?)\s*,\s*i\s*:\s*(.+?)\s*\};?/, `vr${vid}=$1;vi${vid}=$2;`)}}\n`;
+                    } else {
+                        code += `r1=${res[0].r};i1=${res[0].i};vr${vid}=${op.fr};vi${vid}=${op.fi};\n`;
+                    }
+                } else {
+                    if(op.fr.includes("return")) {
+                        code += `r1=${res[0].r};i1=${res[0].i};r2=${res[1].r};i2=${res[1].i};{${op.fr.replace(/return\s*\{\s*r\s*:\s*(.+?)\s*,\s*i\s*:\s*(.+?)\s*\};?/, `vr${vid}=$1;vi${vid}=$2;`)}}\n`;
+                    } else {
+                        code += `r1=${res[0].r};i1=${res[0].i};r2=${res[1].r};i2=${res[1].i};vr${vid}=${op.fr};vi${vid}=${op.fi};\n`;
+                    }
+                }
             }
-            if(!valid) ast = { type: 'c_add', left: { type: 'c_sqr', arg: { type: 'var', val: 'z' } }, right: { type: 'var', val: 'c' } };
-            asts.push(ast);
+            return {r:`vr${vid}`, i:`vi${vid}`};
         }
-        postMessage({ cmd: 'AST_READY', asts });
-    } else if(e.data.cmd === 'CALC_REF') {
-        let f = genASTWorker(e.data.ast);
-        let C = [BigInt(e.data.cx), BigInt(e.data.cy)];
-        let Z = [0n, 0n];
-        let orbit = new Float32Array(e.data.iter * 2);
-        let maxR2 = 256n << (SCALE_BITS * 2n);
-        
-        for(let i=0; i<e.data.iter; i++) {
-            orbit[i*2] = Number(Z[0] >> 60n) / (2**60);
-            orbit[i*2+1] = Number(Z[1] >> 60n) / (2**60);
-            if(bc_abs2(Z) > maxR2) break;
-            Z = f(Z, C, bc_add, bc_sub, bc_mul, bc_sqr, bc_cube);
-        }
-        postMessage({ cmd: 'REF_READY', orbit, idx: e.data.idx, reqCx: e.data.reqCx, reqCy: e.data.reqCy }, [orbit.buffer]);
+        return {r:"zr", i:"zi"};
     }
+    let final = traverse(ast);
+    code += `zr=${final.r};zi=${final.i};\n`;
+    return { code, decls };
+}
+
+const KNOWN_DNA = {
+    "Mandelbrot": "add(sqr(Z),C)",
+    "Burning Ship": "add(sqr(abs(Z)),C)",
+    "Tricorn": "add(sqr(conj(Z)),C)",
+    "Celtic": "add(celticStep(Z),C)",
+    "Buffalo": "add(buffaloStep(Z),C)",
+    "Multibrot Cubic": "add(cub(Z),C)",
+    "Perpendicular": "add(sqr(absRe(Z)),C)"
 };
-`;
+let DNA_MAP = {};
+let tPts = [[0,0,0.5,0.5],[1,0.5,-0.2,0.8],[-1,-1,-1,0],[0.5,-0.5,0.1,0.1]];
 
-const canvas = document.getElementById('glcanvas');
-const gl = canvas.getContext('webgl2', { antialias: false, depth: false, preserveDrawingBuffer: true });
-
-// Safely halt if WebGL2 isn't supported
-if (!gl) {
-    document.body.innerHTML = '<h1 style="color:#f00;text-align:center;margin-top:20%">WebGL2 Required. Please update your browser.</h1>';
-    throw new Error("WebGL2 not supported on this device/browser.");
+function getDNA(astStr) {
+    let ast = P(astStr);
+    let compiled = compileAST(ast, false);
+    let fullCode = `let r1=0,i1=0,r2=0,i2=0;\n${compiled.decls}\n${compiled.code}\nreturn [zr,zi];`;
+    let f = new Function("zr", "zi", "cr", "ci", fullCode);
+    let dna = [];
+    for(let pt of tPts) {
+        try {
+            let res = f(...pt);
+            if(isNaN(res[0])||isNaN(res[1])||!isFinite(res[0])||!isFinite(res[1])) { dna.push(0,0); }
+            else { dna.push(res[0], res[1]); }
+        } catch(e) { dna.push(0,0); }
+    }
+    return dna;
 }
 
-// Hardware Capability Checks (prevents screen flickering on lower-end devices)
-const extFloat = gl.getExtension('EXT_color_buffer_float');
-const extHalfFloat = gl.getExtension('EXT_color_buffer_half_float');
-const extParallel = gl.getExtension('KHR_parallel_shader_compile');
+for(let k in KNOWN_DNA) { DNA_MAP[k] = getDNA(KNOWN_DNA[k]); }
 
-// Determine the best accumulation buffer format based on device hardware
-const ACCUM_INTERNAL = extFloat ? gl.RGBA32F : (extHalfFloat ? gl.RGBA16F : gl.RGBA8);
-const ACCUM_TYPE = extFloat ? gl.FLOAT : (extHalfFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE);
-
-if(!extFloat) console.warn("32-bit float framebuffers not supported. Falling back to lower precision accumulation.");
-
-let w, h;
-let resScale = 1.0;
-let accumTex = gl.createTexture(), accumFbo = gl.createFramebuffer();
-
-let frameCount = 0, isMoving = false, needsPreview = true, lastMoveTime = performance.now();
-let tileIdx = 0, gridTilesX = 8, gridTilesY = 8;
-
-let worker = new Worker(URL.createObjectURL(new Blob([workerCode], {type: 'application/javascript'})));
-
-let mode = 'FULL'; 
-let currentAst = { type: 'c_add', left: { type: 'c_sqr', arg: { type: 'var', val: 'z' } }, right: { type: 'var', val: 'c' } };
-let gridAsts = [];
-let fullProg = null, gridProgs = [null, null, null, null];
-let pendingProgs = [], progsToDelete = [];
-let isCompiling = false, isComputingRef = false, isWaitingForWorker = false;
-let compileWaitFrames = 0;
-
-let zoom = 1.0;
-let centerVirt = [0n, 0n], centerRef = [0n, 0n];
-
-// WebGL2 guarantees reading from 32-bit floats via RG32F is standard, so this is safe globally
-let refOrbitTex = [gl.createTexture(), gl.createTexture(), gl.createTexture(), gl.createTexture()];
-for(let i=0; i<4; i++) {
-    gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[i]);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 256, 256, 0, gl.RG, gl.FLOAT, new Float32Array(256*256*2));
+function cosSim(a, b) {
+    let dot=0, m1=0, m2=0;
+    for(let i=0;i<a.length;i++){
+        dot+=a[i]*b[i]; m1+=a[i]*a[i]; m2+=b[i]*b[i];
+    }
+    if(m1===0||m2===0)return 0;
+    return dot/(Math.sqrt(m1)*Math.sqrt(m2));
 }
+
+function analyzeFractal(astStr) {
+    let dna = getDNA(astStr);
+    let best = "Unknown", bScore = -1;
+    for(let k in DNA_MAP) {
+        let sim = cosSim(dna, DNA_MAP[k]);
+        if(sim>bScore) { bScore=sim; best=k; }
+    }
+    let pct = Math.max(0, Math.min(100, Math.round(bScore*100)));
+    if(isNaN(pct)) pct=0;
+    return {n:best, p:pct};
+}
+
+function genRandomAST(depth) {
+    if(depth===0) return Math.random()<0.5?{t:"Z"}:{t:"C"};
+    let keys = Object.keys(O).filter(k=>!k.startsWith("var"));
+    let op = keys[Math.floor(Math.random()*keys.length)];
+    if(O[op].t===1) return {t:"OP", n:op, a:[genRandomAST(depth-1)]};
+    return {t:"OP", n:op, a:[genRandomAST(depth-1), genRandomAST(depth-1)]};
+}
+
+let curAST = P("add(sqr(Z),C)");
+let cx=0n, cy=0n, scaleBits=100n, zoomExp2=1.0, resScale=1.0, currentPass=0, renderId=0, activeRenderId=0, isDragging=false, lastPinchDist=0, dragStartX=0, dragStartY=0;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const numWorkers = navigator.hardwareConcurrency || 4;
+let workers = [];
+let completedWorkers = 0;
+
+function buildWorkers() {
+    for(let w of workers) w.terminate();
+    workers = [];
+    let floatAST = compileAST(curAST, false);
+    let bigAST = compileAST(curAST, true);
+    
+    const code = `
+    let activeId = 0;
+    let currentPass = -1;
+    self.onmessage = function(e) {
+        const { id, pass, cx, cy, scaleBits, zoomExp2, width, height, startY_band, endY_band, maxIter } = e.data;
+        if (activeId !== id || currentPass !== pass) {
+            activeId = id; currentPass = pass;
+        } else if (activeId !== id) return;
+
+        const stride = [16, 8, 4, 2, 1][pass];
+        const bits = Math.max(54, Math.ceil(zoomExp2) + 64);
+        const useBigInt = zoomExp2 > 47;
+        
+        let shift, scale, Sc, escapeB;
+        let startX_val, startY_val, stepX, stepY;
+        let startXf_val, startYf_val, stepXf, stepYf;
+
+        if (useBigInt) {
+            shift = BigInt(bits);
+            scale = 1n << shift;
+            Sc = scale;
+            escapeB = 4n * scale;
+            const inputScale = BigInt(scaleBits);
+            let cxB = BigInt(cx), cyB = BigInt(cy);
+            if (shift > inputScale) { cxB <<= (shift - inputScale); cyB <<= (shift - inputScale); } 
+            else if (shift < inputScale) { cxB >>= (inputScale - shift); cyB >>= (inputScale - shift); }
+            
+            const wB = BigInt(width), hB = BigInt(height);
+            const zoomInt = BigInt(Math.floor(zoomExp2));
+            const frac = zoomExp2 - Math.floor(zoomExp2);
+            const fracScale = BigInt(Math.floor(Math.pow(2, 1.0 - frac) * 1000000));
+            
+            let viewW = zoomInt < 0n ? (4n * scale) << -zoomInt : (4n * scale) >> zoomInt;
+            viewW = (viewW * fracScale) / 1000000n;
+            let viewH = (viewW * hB) / wB;
+            
+            startX_val = cxB - viewW / 2n;
+            startY_val = cyB - viewH / 2n;
+            stepX = viewW / wB; stepY = viewH / hB;
+        } else {
+            let viewWf = 4.0 / Math.pow(2, zoomExp2);
+            let viewHf = viewWf * (height / width);
+            let cxf = Number(BigInt(cx)) / Math.pow(2, Number(scaleBits));
+            let cyf = Number(BigInt(cy)) / Math.pow(2, Number(scaleBits));
+            startXf_val = cxf - viewWf / 2.0;
+            startYf_val = cyf - viewHf / 2.0;
+            stepXf = viewWf / width; stepYf = viewHf / height;
+        }
+
+        const CHUNK_SIZE_ROWS = useBigInt ? Math.max(stride, 2) : 64;
+        let curY = startY_band;
+
+        function processChunk() {
+            if (activeId !== id) return;
+            let processed = 0, actualRows = 0;
+            let output = new Uint16Array(Math.ceil(width / stride) * Math.ceil(CHUNK_SIZE_ROWS / stride));
+            let idx = 0;
+
+            if (useBigInt) {
+                let S = shift;
+                let r1=0n,i1=0n,r2=0n,i2=0n;
+                ${bigAST.decls}
+                const stepX_stride = stepX * BigInt(stride);
+                for (let y = curY; y < endY_band && processed < CHUNK_SIZE_ROWS; y += stride) {
+                    processed += stride; actualRows += stride;
+                    let cr = startX_val;
+                    let ci = startY_val + BigInt(y) * stepY;
+                    for (let x = 0; x < width; x += stride) {
+                        let zr = 0n, zi = 0n, iter = 0;
+                        let old_zr = 0n, old_zi = 0n, periodLimit = 2, period = 0;
+                        while (iter < maxIter) {
+                            ${bigAST.code}
+                            if (((zr * zr) >> S) + ((zi * zi) >> S) > escapeB) break;
+                            
+                            let dr = zr - old_zr; if (dr < 0n) dr = -dr;
+                            let di = zi - old_zi; if (di < 0n) di = -di;
+                            if (dr <= 16n && di <= 16n) { iter = maxIter; break; }
+                            
+                            if (period === periodLimit) { periodLimit <<= 1; period = 0; old_zr = zr; old_zi = zi; }
+                            period++; iter++;
+                        }
+                        output[idx++] = iter;
+                        cr += stepX_stride;
+                    }
+                }
+            } else {
+                let r1=0,i1=0,r2=0,i2=0;
+                ${floatAST.decls}
+                const stepXf_stride = stepXf * stride;
+                for (let y = curY; y < endY_band && processed < CHUNK_SIZE_ROWS; y += stride) {
+                    processed += stride; actualRows += stride;
+                    let cr = startXf_val;
+                    let ci = startYf_val + y * stepYf;
+                    for (let x = 0; x < width; x += stride) {
+                        let zr = 0.0, zi = 0.0, iter = 0;
+                        let old_zrf = 0.0, old_zif = 0.0, periodLimit = 2, period = 0;
+                        while (iter < maxIter) {
+                            ${floatAST.code}
+                            if (zr * zr + zi * zi > 4.0) break;
+                            
+                            let drf = zr - old_zrf; if (drf < 0) drf = -drf;
+                            let dif = zi - old_zif; if (dif < 0) dif = -dif;
+                            if (drf <= 1e-15 && dif <= 1e-15) { iter = maxIter; break; }
+
+                            if (period === periodLimit) { periodLimit <<= 1; period = 0; old_zrf = zr; old_zif = zi; }
+                            period++; iter++;
+                        }
+                        output[idx++] = iter;
+                        cr += stepXf_stride;
+                    }
+                }
+            }
+            
+            self.postMessage({ id, pass, output, stride, width, maxIter, startY: curY, rows: actualRows });
+            curY += processed;
+            if (curY < endY_band) {
+                setTimeout(processChunk, 0);
+            } else {
+                self.postMessage({ id, pass, done: true });
+            }
+        }
+        processChunk();
+    };`;
+    const blob = new Blob([code], {type: 'application/javascript'});
+    for(let i=0; i<numWorkers; i++) {
+        let w = new Worker(URL.createObjectURL(blob));
+        w.onmessage = handleWorkerMessage;
+        workers.push(w);
+    }
+}
+
+function handleWorkerMessage(e) {
+    if (e.data.id !== activeRenderId) return;
+    if (e.data.done) {
+        completedWorkers++;
+        if (completedWorkers === numWorkers) {
+            currentPass++;
+            runPass();
+        }
+        return;
+    }
+    drawOutput(e.data);
+}
+
+function drawOutput(data) {
+    const { output, stride, width, maxIter, startY, rows } = data;
+    const imgData = ctx.createImageData(width, rows);
+    const buf = new Uint32Array(imgData.data.buffer);
+    
+    let idx = 0;
+    for (let y = 0; y < rows; y += stride) {
+        for (let x = 0; x < width; x += stride) {
+            const iter = output[idx++];
+            let c = 0xFF000000;
+            if (iter < maxIter) {
+                const t = iter / maxIter;
+                const r = Math.floor(Math.sin(15 * t) * 127 + 128);
+                const g = Math.floor(Math.sin(15 * t + 2) * 127 + 128);
+                const b = Math.floor(Math.sin(15 * t + 4) * 127 + 128);
+                c = 0xFF000000 | (b << 16) | (g << 8) | r;
+            }
+            for (let sy = 0; sy < stride && y + sy < rows; sy++) {
+                for (let sx = 0; sx < stride && x + sx < width; sx++) {
+                    buf[(y + sy) * width + (x + sx)] = c;
+                }
+            }
+        }
+    }
+    ctx.putImageData(imgData, 0, startY);
+}
+
+function resetView() {
+    cx = 0n; cy = 0n; scaleBits = 100n; zoomExp2 = 1.0;
+    let s = stringifyAST(curAST);
+    document.getElementById('eq-disp').innerText = s;
+    document.getElementById('eq-text').value = s;
+    let an = analyzeFractal(s);
+    document.getElementById('twin-disp').innerText = `Closest Twin: ${an.n} (${an.p}%)`;
+    buildWorkers();
+    triggerRender();
+}
+
+function getMaxIter() { return Math.floor(100 + Math.max(0, zoomExp2) * 10.0); }
 
 function resize() {
-    w = Math.floor(window.innerWidth * resScale * window.devicePixelRatio);
-    h = Math.floor(window.innerHeight * resScale * window.devicePixelRatio);
-    canvas.width = w; canvas.height = h;
-    canvas.style.width = window.innerWidth + 'px';
-    canvas.style.height = window.innerHeight + 'px';
-    
-    gl.bindTexture(gl.TEXTURE_2D, accumTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    
-    // Safely define the texture using the verified hardware formats
-    gl.texImage2D(gl.TEXTURE_2D, 0, ACCUM_INTERNAL, w, h, 0, gl.RGBA, ACCUM_TYPE, null);
-    
-    gl.bindFramebuffer(gl.FRAMEBUFFER, accumFbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accumTex, 0);
-    
-    // Safety check ensuring the framebuffer actually built properly
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-        console.error("Framebuffer initialization failed. Hardware may lack support.");
-    }
-    
-    frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
+    canvas.width = Math.floor(window.innerWidth * resScale);
+    canvas.height = Math.floor(window.innerHeight * resScale);
+    triggerRender();
 }
+
+function triggerRender() {
+    renderId++;
+    activeRenderId = renderId;
+    currentPass = 0;
+    document.getElementById('zoom-disp').innerText = (zoomExp2 * Math.log10(2)).toFixed(2);
+    document.getElementById('iter-disp').innerText = getMaxIter();
+    runPass();
+}
+
+function runPass() {
+    if (currentPass > 4) return;
+    document.getElementById('pass-disp').innerText = currentPass;
+    completedWorkers = 0;
+    
+    const bandHeight = Math.ceil(canvas.height / numWorkers);
+    for(let i=0; i<numWorkers; i++) {
+        let startY = i * bandHeight;
+        let endY = Math.min(canvas.height, (i+1) * bandHeight);
+        workers[i].postMessage({
+            id: activeRenderId, pass: currentPass, cx: cx.toString(), cy: cy.toString(),
+            scaleBits: scaleBits.toString(), zoomExp2: zoomExp2, width: canvas.width, height: canvas.height,
+            startY_band: startY, endY_band: endY, maxIter: getMaxIter()
+        });
+    }
+}
+
+function getPanScale() {
+    const wB = BigInt(canvas.width);
+    const requiredBits = BigInt(Math.max(54, Math.ceil(zoomExp2) + 64));
+    const zoomInt = BigInt(Math.floor(zoomExp2));
+    const frac = zoomExp2 - Math.floor(zoomExp2);
+    const fracScale = BigInt(Math.floor(Math.pow(2, 1.0 - frac) * 1000000));
+    let viewW = zoomInt < 0n ? (4n << requiredBits) << -zoomInt : (4n << requiredBits) >> zoomInt;
+    viewW = (viewW * fracScale) / 1000000n;
+    return { step: viewW / wB, targetBits: requiredBits };
+}
+
+function applyPan(dx, dy) {
+    const p = getPanScale();
+    if (scaleBits !== p.targetBits) {
+        if (scaleBits < p.targetBits) { cx <<= (p.targetBits - scaleBits); cy <<= (p.targetBits - scaleBits); } 
+        else { cx >>= (scaleBits - p.targetBits); cy >>= (scaleBits - p.targetBits); }
+        scaleBits = p.targetBits;
+    }
+    cx -= BigInt(Math.floor(dx)) * p.step;
+    cy -= BigInt(Math.floor(dy)) * p.step;
+    triggerRender();
+}
+
+function applyZoom(px_client, py_client, zoomDelta) {
+    const oldScale = getPanScale();
+    const oldBits = oldScale.targetBits;
+    zoomExp2 += zoomDelta;
+    const newScale = getPanScale();
+    const newBits = newScale.targetBits;
+
+    let oldStep = oldScale.step;
+    if (newBits > oldBits) {
+        const shift = newBits - oldBits;
+        cx <<= shift; cy <<= shift; oldStep <<= shift;
+    } else if (newBits < oldBits) {
+        const shift = oldBits - newBits;
+        cx >>= shift; cy >>= shift; oldStep >>= shift;
+    }
+    scaleBits = newBits;
+
+    const dx_canvas = (px_client - window.innerWidth / 2) * resScale;
+    const dy_canvas = (py_client - window.innerHeight / 2) * resScale;
+    const diffStep = oldStep - newScale.step;
+    
+    cx += (BigInt(Math.round(dx_canvas * 1000)) * diffStep) / 1000n;
+    cy += (BigInt(Math.round(dy_canvas * 1000)) * diffStep) / 1000n;
+
+    triggerRender();
+}
+
 window.addEventListener('resize', resize);
+document.getElementById('btn-rand').addEventListener('click', () => { curAST={t:"OP",n:"add",a:[genRandomAST(Math.floor(Math.random()*3)+1),{t:"C"}]}; resetView(); });
+document.getElementById('btn-menu').addEventListener('click', () => document.getElementById('modal').style.display='flex');
+document.getElementById('btn-close').addEventListener('click', () => document.getElementById('modal').style.display='none');
+document.getElementById('btn-copy').addEventListener('click', () => { document.getElementById('eq-text').select(); document.execCommand('copy'); });
+document.getElementById('btn-load').addEventListener('click', () => {
+    try { curAST = P(document.getElementById('eq-input').value); resetView(); document.getElementById('modal').style.display='none'; }
+    catch(e) { alert("Invalid equation format!"); }
+});
+document.getElementById('res-sel').addEventListener('change', (e) => { resScale = parseFloat(e.target.value); resize(); });
+
+document.getElementById('btn-seek').addEventListener('click', () => {
+    const w = canvas.width, h = canvas.height;
+    const data = ctx.getImageData(0, 0, w, h).data;
+    const cx_pix = Math.floor(w / 2), cy_pix = Math.floor(h / 2);
+    let minDist = Infinity;
+    let bx = -1, by = -1;
+    
+    let centerIdx = (cy_pix * w + cx_pix) * 4;
+    let isCenterBlack = (data[centerIdx] === 0 && data[centerIdx+1] === 0 && data[centerIdx+2] === 0);
+
+    for(let y = 0; y < h; y += 2) {
+        for(let x = 0; x < w; x += 2) {
+            let i = (y * w + x) * 4;
+            let isBlack = (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0);
+            
+            if (isCenterBlack ? !isBlack : isBlack) {
+                let dist = (x - cx_pix) * (x - cx_pix) + (y - cy_pix) * (y - cy_pix);
+                if(dist < minDist) {
+                    minDist = dist;
+                    bx = x; by = y;
+                }
+            }
+        }
+    }
+    if(bx !== -1 && minDist > 0) applyPan(-(bx - cx_pix), -(by - cy_pix));
+});
+
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); applyZoom(e.clientX, e.clientY, e.deltaY * -0.003); }, {passive: false});
+canvas.addEventListener('pointerdown', (e) => { isDragging = true; dragStartX = e.clientX; dragStartY = e.clientY; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', (e) => {
+    if (!isDragging) return;
+    if (e.isPrimary) {
+        const dx = (e.clientX - dragStartX) * resScale; const dy = (e.clientY - dragStartY) * resScale;
+        dragStartX = e.clientX; dragStartY = e.clientY;
+        applyPan(dx, dy);
+    }
+});
+canvas.addEventListener('pointerup', (e) => { isDragging = false; canvas.releasePointerCapture(e.pointerId); });
+canvas.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        lastPinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    }
+}, {passive: false});
+canvas.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+        const px = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const py = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        applyZoom(px, py, (dist - lastPinchDist) * 0.015);
+        lastPinchDist = dist;
+    }
+}, {passive: false});
+
+resetView();
 resize();
-
-function compileGLSL(ast) {
-    let id = 0, code = '';
-    function tr(n) {
-        let myId = id++;
-        if(n.type === 'var') {
-            if(n.val === 'z') code += `vec2 r_${myId}=Xn; vec2 d_${myId}=z; vec2 dz_${myId}=dz;\n`;
-            else code += `vec2 r_${myId}=u_center; vec2 d_${myId}=c; vec2 dz_${myId}=vec2(1.0,0.0);\n`;
-        } else if(n.type === 'c_sqr') {
-            let a = tr(n.arg);
-            code += `vec2 r_${myId}=c_sqr(r_${a}); vec2 d_${myId}=2.0*c_mul(r_${a},d_${a})+c_sqr(d_${a}); vec2 dz_${myId}=2.0*c_mul(r_${a}+d_${a},dz_${a});\n`;
-        } else if(n.type === 'c_cube') {
-            let a = tr(n.arg);
-            code += `vec2 r_${myId}=c_cube(r_${a}); vec2 aF_${myId}=r_${a}+d_${a}; vec2 d_${myId}=3.0*c_mul(c_sqr(r_${a}),d_${a})+3.0*c_mul(r_${a},c_sqr(d_${a}))+c_cube(d_${a}); vec2 dz_${myId}=3.0*c_mul(c_sqr(aF_${myId}),dz_${a});\n`;
-        } else if(n.type === 'c_add') {
-            let a = tr(n.left), b = tr(n.right);
-            code += `vec2 r_${myId}=r_${a}+r_${b}; vec2 d_${myId}=d_${a}+d_${b}; vec2 dz_${myId}=dz_${a}+dz_${b};\n`;
-        } else if(n.type === 'c_sub') {
-            let a = tr(n.left), b = tr(n.right);
-            code += `vec2 r_${myId}=r_${a}-r_${b}; vec2 d_${myId}=d_${a}-d_${b}; vec2 dz_${myId}=dz_${a}-dz_${b};\n`;
-        } else if(n.type === 'c_mul') {
-            let a = tr(n.left), b = tr(n.right);
-            code += `vec2 r_${myId}=c_mul(r_${a},r_${b}); vec2 d_${myId}=c_mul(r_${a},d_${b})+c_mul(r_${b},d_${a})+c_mul(d_${a},d_${b}); vec2 dz_${myId}=c_mul(r_${a}+d_${a},dz_${b})+c_mul(r_${b}+d_${b},dz_${a});\n`;
-        }
-        return myId;
-    }
-    let r = tr(ast);
-    code += `out_z = d_${r}; out_dz = dz_${r}; out_full = r_${r} + d_${r};\n`;
-    return code;
-}
-
-const vsSource = `#version 300 es
-in vec2 position; out vec2 vUv;
-void main() { vUv = position * 0.5 + 0.5; gl_Position = vec4(position, 0.0, 1.0); }`;
-
-const fsTemplate = `#version 300 es
-precision highp float; precision highp int;
-in vec2 vUv; out vec4 fragColor;
-
-uniform sampler2D u_ref_tex;
-uniform vec2 u_res;
-uniform vec2 u_center;
-uniform vec2 u_dc_offset;
-uniform float u_span;
-uniform int u_iter;
-uniform vec3 u_color;
-uniform vec2 u_jitter;
-uniform float u_alpha;
-
-vec2 c_mul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
-vec2 c_sqr(vec2 a) { return vec2(a.x*a.x - a.y*a.y, 2.0*a.x*a.y); }
-vec2 c_cube(vec2 a) { return c_mul(c_sqr(a), a); }
-
-void evalAST(vec2 Xn, vec2 z, vec2 c, vec2 dz, out vec2 out_z, out vec2 out_dz, out vec2 out_full) {
-    _MATH_
-}
-
-void main() {
-    vec2 dc = (vUv - 0.5 + u_jitter / u_res) * u_span * vec2(u_res.x/u_res.y, 1.0) + u_dc_offset;
-    vec2 z = vec2(0.0), c = dc, dz = vec2(0.0), z_full = vec2(0.0);
-    int count = 0; float r2 = 0.0;
-    
-    for(int i = 0; i < 300; i++) {
-        for(int j = 0; j < 100; j++) {
-            if(count >= u_iter) break;
-            ivec2 t_uv = ivec2(count % 256, count / 256);
-            vec2 Xn = texelFetch(u_ref_tex, t_uv, 0).xy;
-            
-            vec2 next_z, next_dz, next_full;
-            evalAST(Xn, z, c, dz, next_z, next_dz, next_full);
-            z = next_z; dz = next_dz; z_full = next_full;
-            
-            r2 = dot(z_full, z_full);
-            if(r2 > 256.0) break;
-            count++;
-        }
-        if(r2 > 256.0 || count >= u_iter) break;
-    }
-    
-    if(!(r2 > 256.0)) { fragColor = vec4(0.0, 0.0, 0.0, u_alpha); return; }
-    
-    float r = sqrt(r2);
-    float dr = length(dz);
-    float de = 0.5 * r * log(r) / (dr + 1e-15);
-    float de_px = de * u_res.y / u_span;
-    float edge = clamp(1.2 - de_px, 0.0, 1.0);
-    float sn = float(count) - log2(log2(r2)/2.0) + 4.0;
-    vec3 col = 0.5 + 0.5 * cos(3.0 + sn * 0.15 + u_color);
-    fragColor = vec4(col * (edge + 0.6 * exp(-de_px * 0.08)), u_alpha);
-}`;
-
-function buildProgram(ast) {
-    let p = gl.createProgram();
-    let vs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(vs, vsSource); gl.compileShader(vs);
-    let fs = gl.createShader(gl.FRAGMENT_SHADER); 
-    gl.shaderSource(fs, fsTemplate.replace('_MATH_', compileGLSL(ast))); 
-    gl.compileShader(fs);
-    
-    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-        console.error("Fractal FS Error:", gl.getShaderInfoLog(fs));
-    }
-    
-    gl.attachShader(p, vs); gl.attachShader(p, fs); gl.bindAttribLocation(p, 0, 'position'); gl.linkProgram(p);
-    return { prog: p, vs: vs, fs: fs, col: [Math.random()*6, Math.random()*6, Math.random()*6], locs: null };
-}
-
-function deleteProgram(p) {
-    if(!p || !p.prog) return;
-    let shaders = gl.getAttachedShaders(p.prog);
-    if(shaders) shaders.forEach(s => { gl.detachShader(p.prog, s); gl.deleteShader(s); });
-    gl.deleteProgram(p.prog);
-}
-
-const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
-const qbuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, qbuf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-const hudFs = `#version 300 es
-precision highp float; precision highp int;
-in vec2 vUv; out vec4 fragColor;
-uniform sampler2D u_tex;
-uniform vec2 u_res;
-uniform int u_txt1[64]; uniform int u_len1;
-uniform int u_txt2[64]; uniform int u_len2;
-uniform vec4 u_btns[4]; uniform int u_hvr[4];
-uniform int u_txt_btn[24]; uniform int u_b_lens[4];
-uniform float u_ui_scale;
-
-uint font[59] = uint[](
-    0u, 9346u, 24576u, 31725u, 14827u, 21845u, 15663u, 8192u, 10530u, 8770u, 2728u, 5504u, 2u, 448u, 2u, 4368u,
-    31599u, 9362u, 29671u, 29391u, 23497u, 31183u, 31215u, 29257u, 31727u, 31695u,
-    1040u, 1042u, 5904u, 3640u, 17424u, 10608u, 31725u,
-    31725u, 14827u, 15663u, 14815u, 31143u, 31140u, 15855u, 23533u, 29847u, 9455u, 23465u, 18735u, 23277u, 23501u, 31599u, 31716u, 31603u, 31721u, 31183u, 29842u, 23535u, 23402u, 23533u, 23469u, 23466u, 29671u
-);
-
-float sdBox(vec2 p, vec2 b) { vec2 d = abs(p) - b; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); }
-
-float textSDF(vec2 p, vec2 pos, float scale, int[64] txt, int len) {
-    vec2 up = (p - pos) / scale;
-    if(up.x < 0.0 || up.y < 0.0 || up.y > 1.0 || up.x > float(len)) return 1.0;
-    int idx = int(up.x); int ascii = txt[idx];
-    if(ascii < 32 || ascii > 90) return 1.0;
-    uint chr = font[ascii - 32];
-    vec2 fuv = vec2(fract(up.x), up.y);
-    fuv = (fuv - 0.1) * 1.25;
-    if(fuv.x < 0.0 || fuv.x > 1.0 || fuv.y < 0.0 || fuv.y > 1.0) return 1.0;
-    ivec2 iuv = ivec2(fuv * vec2(3.0, 5.0));
-    int bit = (4 - iuv.y) * 3 + iuv.x;
-    if(((chr >> uint(bit)) & 1u) == 0u) return 1.0;
-    vec2 cp = (vec2(iuv) + 0.5) / vec2(3.0, 5.0);
-    return length(fuv - cp) - 0.15;
-}
-
-void main() {
-    vec4 bg = texture(u_tex, vUv);
-    vec2 p = gl_FragCoord.xy;
-    vec3 ui = vec3(0.0); float uiAlpha = 0.0;
-    
-    float t1 = textSDF(p, vec2(20.0 * u_ui_scale, u_res.y - 30.0 * u_ui_scale), 16.0 * u_ui_scale, u_txt1, u_len1);
-    if(t1 < 0.0) { ui = mix(ui, vec3(0.0, 1.0, 0.6), clamp(-t1*10.0, 0.0, 1.0)); uiAlpha = max(uiAlpha, clamp(-t1*10.0, 0.0, 1.0)); }
-    
-    float t2 = textSDF(p, vec2(20.0 * u_ui_scale, u_res.y - 50.0 * u_ui_scale), 12.0 * u_ui_scale, u_txt2, u_len2);
-    if(t2 < 0.0) { ui = mix(ui, vec3(0.0, 1.0, 1.0), clamp(-t2*10.0, 0.0, 1.0)); uiAlpha = max(uiAlpha, clamp(-t2*10.0, 0.0, 1.0)); }
-
-    int b_off = 0;
-    for(int i=0; i<4; i++) {
-        vec2 bc = u_btns[i].xy; vec2 bs = u_btns[i].zw;
-        float db = sdBox(p - bc, bs) - 4.0 * u_ui_scale;
-        if(db < 2.0 * u_ui_scale) {
-            float alpha = u_hvr[i] == 1 ? 0.4 : 0.15;
-            ui = mix(ui, vec3(0.0, 1.0, 0.6), alpha * clamp(2.0*u_ui_scale - abs(db), 0.0, 1.0));
-            uiAlpha = max(uiAlpha, alpha);
-        }
-        int blen = u_b_lens[i];
-        int btxt[64]; for(int j=0; j<64; j++) { if(j<blen) btxt[j] = u_txt_btn[b_off+j]; else btxt[j]=32; }
-        float tb = textSDF(p, bc - vec2(float(blen)*6.0*u_ui_scale, 6.0*u_ui_scale), 12.0*u_ui_scale, btxt, blen);
-        if(tb < 0.0) { ui = mix(ui, vec3(1.0), clamp(-tb*10.0, 0.0, 1.0)); uiAlpha = max(uiAlpha, clamp(-tb*10.0, 0.0, 1.0)); }
-        b_off += blen;
-    }
-
-    if(u_len2 == -1) {
-        float gridLines = min(abs(p.x - u_res.x/2.0), abs(p.y - u_res.y/2.0));
-        if(gridLines < 2.0 * u_ui_scale) { ui = vec3(0.0, 1.0, 0.6); uiAlpha = 0.3; }
-    }
-    
-    fragColor = mix(bg, vec4(ui, 1.0), uiAlpha);
-}`;
-
-let hudProg = gl.createProgram();
-let hVs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(hVs, vsSource); gl.compileShader(hVs);
-let hFs = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(hFs, hudFs); gl.compileShader(hFs);
-
-if (!gl.getShaderParameter(hFs, gl.COMPILE_STATUS)) console.error("HUD FS Error:", gl.getShaderInfoLog(hFs));
-
-gl.attachShader(hudProg, hVs); gl.attachShader(hudProg, hFs); gl.linkProgram(hudProg);
-
-const hudLocs = {
-    res: gl.getUniformLocation(hudProg, 'u_res'), txt1: gl.getUniformLocation(hudProg, 'u_txt1'), len1: gl.getUniformLocation(hudProg, 'u_len1'),
-    txt2: gl.getUniformLocation(hudProg, 'u_txt2'), len2: gl.getUniformLocation(hudProg, 'u_len2'),
-    btns: gl.getUniformLocation(hudProg, 'u_btns'), hvr: gl.getUniformLocation(hudProg, 'u_hvr'),
-    txt_btn: gl.getUniformLocation(hudProg, 'u_txt_btn'), b_lens: gl.getUniformLocation(hudProg, 'u_b_lens'),
-    scale: gl.getUniformLocation(hudProg, 'u_ui_scale')
-};
-
-function astToStr(n) {
-    if(n.type === 'var') return n.val.toUpperCase();
-    if(n.type === 'c_sqr') return `(${astToStr(n.arg)})^2`;
-    if(n.type === 'c_cube') return `(${astToStr(n.arg)})^3`;
-    if(n.type === 'c_add') return `(${astToStr(n.left)}+${astToStr(n.right)})`;
-    if(n.type === 'c_sub') return `(${astToStr(n.left)}-${astToStr(n.right)})`;
-    if(n.type === 'c_mul') return `(${astToStr(n.left)}*${astToStr(n.right)})`;
-}
-
-function fillStr(str, arr) { for(let i=0; i<64; i++) arr[i] = i < str.length ? str.charCodeAt(i) : 32; }
-
-let strArr1 = new Int32Array(64), strArr2 = new Int32Array(64);
-let btnTxt = new Int32Array(24), btnLens = new Int32Array(4);
-let bData = "EVOLVERANDOMDNARES";
-for(let i=0; i<18; i++) btnTxt[i] = bData.charCodeAt(i);
-btnLens[0]=6; btnLens[1]=6; btnLens[2]=3; btnLens[3]=3;
-let btnRects = new Float32Array(16), btnHvr = new Int32Array(4);
-
-function updateUI() {
-    let pxRatio = resScale * window.devicePixelRatio;
-    let bw = 80, bh = 30, gap = 10, totalW = 4*bw + 3*gap, sx = window.innerWidth/2 - totalW/2;
-    for(let i=0; i<4; i++) {
-        btnRects[i*4] = (sx + i*(bw+gap) + bw/2) * pxRatio;
-        btnRects[i*4+1] = 40 * pxRatio;
-        btnRects[i*4+2] = (bw/2) * pxRatio;
-        btnRects[i*4+3] = (bh/2) * pxRatio;
-    }
-}
-
-function kickEvolve(cmd, dna=null) {
-    if(isWaitingForWorker || isCompiling) return;
-    isWaitingForWorker = true;
-    needsPreview = true;
-    worker.postMessage({ cmd: cmd, baseAst: currentAst, asts: dna });
-}
-worker.onmessage = function(e) {
-    if(e.data.cmd === 'AST_READY') {
-        gridAsts = e.data.asts;
-        pendingProgs = gridAsts.map(buildProgram);
-        isWaitingForWorker = false;
-        isCompiling = true;
-        compileWaitFrames = 0;
-    } else if(e.data.cmd === 'REF_READY') {
-        gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[e.data.idx]);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, e.data.orbit);
-        isComputingRef = false;
-        frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
-        centerRef = [BigInt(e.data.reqCx), BigInt(e.data.reqCy)];
-    }
-};
-
-kickEvolve('RANDOM');
-
-function handleEvolve() { if(mode==='FULL') kickEvolve('EVOLVE'); }
-function handleRandom() { if(mode==='FULL') kickEvolve('RANDOM'); }
-function handleDNA() {
-    if(mode!=='FULL') return;
-    let input = prompt("PASTE DNA SEQUENCE OR COPY CURRENT:", btoa(JSON.stringify(currentAst)));
-    if(input && input !== btoa(JSON.stringify(currentAst))) {
-        try { let ast = JSON.parse(atob(input)); kickEvolve('DNA', [ast, ast, ast, ast]); } catch(e){}
-    }
-}
-function handleRes() { resScale = resScale === 1.0 ? 0.5 : (resScale === 0.5 ? 0.25 : 1.0); resize(); updateUI(); }
-
-let mouseX = 0, mouseY = 0, isDown = false, lastP = null;
-window.addEventListener('mousemove', e => {
-    mouseX = e.clientX; mouseY = e.clientY;
-    let sx = window.innerWidth/2 - 175;
-    for(let i=0; i<4; i++) btnHvr[i] = (mouseY > window.innerHeight-55 && mouseY < window.innerHeight-25 && mouseX > sx + i*90 && mouseX < sx + i*90 + 80) ? 1 : 0;
-    if(isDown && mode === 'FULL' && !btnHvr.includes(1) && !isWaitingForWorker && !isCompiling) {
-        let dx = mouseX - lastP.x, dy = mouseY - lastP.y;
-        let span = 4.0 / zoom;
-        let deltaX = (-dx / window.innerWidth) * span * (w/h);
-        let deltaY = (dy / window.innerHeight) * span;
-        centerVirt[0] += BigInt(Math.floor(deltaX * 2**50)) << 70n;
-        centerVirt[1] += BigInt(Math.floor(deltaY * 2**50)) << 70n;
-        lastP = { x: mouseX, y: mouseY };
-        frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
-    }
-});
-window.addEventListener('mousedown', e => {
-    isDown = true; lastP = { x: mouseX, y: mouseY };
-    if(btnHvr[0]) handleEvolve(); else if(btnHvr[1]) handleRandom(); else if(btnHvr[2]) handleDNA(); else if(btnHvr[3]) handleRes();
-    else if(mode === 'GRID' && !isCompiling && !isWaitingForWorker) {
-        let idx = (mouseX > window.innerWidth/2 ? 1 : 0) + (mouseY > window.innerHeight/2 ? 2 : 0);
-        fullProg = gridProgs[idx]; currentAst = gridAsts[idx];
-        zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; mode = 'FULL';
-        frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
-    }
-});
-window.addEventListener('mouseup', () => { isDown = false; isMoving = false; });
-window.addEventListener('wheel', e => {
-    if(mode !== 'FULL' || isCompiling || isWaitingForWorker) return;
-    zoom *= Math.pow(0.998, e.deltaY);
-    frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
-    clearTimeout(window.wheelTimeout);
-    window.wheelTimeout = setTimeout(() => { isMoving = false; }, 200);
-});
-
-let touchHasMoved = false;
-let initialTouchDist = 0, initialZoom = 1.0;
-
-window.addEventListener('touchstart', e => {
-    if (e.touches.length === 2) {
-        initialTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-        initialZoom = zoom;
-        isDown = false; 
-        touchHasMoved = true;
-    } else if (e.touches.length === 1) {
-        mouseX = e.touches[0].clientX; mouseY = e.touches[0].clientY;
-        let sx = window.innerWidth/2 - 175;
-        for(let i=0; i<4; i++) btnHvr[i] = (mouseY > window.innerHeight-55 && mouseY < window.innerHeight-25 && mouseX > sx + i*90 && mouseX < sx + i*90 + 80) ? 1 : 0;
-        isDown = true; lastP = { x: mouseX, y: mouseY };
-        touchHasMoved = false;
-    }
-}, {passive: false});
-
-window.addEventListener('touchmove', e => {
-    if (btnHvr.includes(1) || mode !== 'FULL' || isWaitingForWorker || isCompiling) return;
-    touchHasMoved = true;
-    
-    if (e.touches.length === 2) {
-        e.preventDefault();
-        let currentDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-        if (initialTouchDist > 0) {
-            zoom = initialZoom * (currentDist / initialTouchDist); 
-            frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
-        }
-    } else if (e.touches.length === 1 && isDown) {
-        e.preventDefault();
-        let nx = e.touches[0].clientX, ny = e.touches[0].clientY;
-        let dx = nx - lastP.x, dy = ny - lastP.y;
-        let span = 4.0 / zoom;
-        centerVirt[0] += BigInt(Math.floor((-dx / window.innerWidth) * span * (w/h) * 2**50)) << 70n;
-        centerVirt[1] += BigInt(Math.floor((dy / window.innerHeight) * span * 2**50)) << 70n;
-        lastP = { x: nx, y: ny };
-        frameCount = 0; tileIdx = 0; isMoving = true; needsPreview = true; lastMoveTime = performance.now();
-    }
-}, {passive: false});
-
-window.addEventListener('touchend', e => {
-    if (e.touches.length < 2) {
-        initialTouchDist = 0;
-    }
-    
-    if (e.touches.length === 0) {
-        isDown = false; 
-        isMoving = false;
-        
-        if (!touchHasMoved) {
-            if(btnHvr[0]) handleEvolve(); else if(btnHvr[1]) handleRandom(); else if(btnHvr[2]) handleDNA(); else if(btnHvr[3]) handleRes();
-            else if(mode === 'GRID' && !isCompiling && !isWaitingForWorker) {
-                let idx = (mouseX > window.innerWidth/2 ? 1 : 0) + (mouseY > window.innerHeight/2 ? 2 : 0);
-                fullProg = gridProgs[idx]; currentAst = gridAsts[idx];
-                zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; mode = 'FULL';
-                frameCount = 0; tileIdx = 0; needsPreview = true; lastMoveTime = performance.now();
-            }
-        }
-    } else if (e.touches.length === 1) {
-        lastP = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-        isDown = true; 
-    }
-});
-
-function reqOrbit(ast, idx) {
-    if(isComputingRef) return;
-    isComputingRef = true;
-    let cx = centerVirt[0].toString(), cy = centerVirt[1].toString();
-    worker.postMessage({ cmd: 'CALC_REF', ast, cx, cy, iter: 65536, idx, reqCx: cx, reqCy: cy });
-}
-
-function renderShader(p, view, alpha, jx, jy, maxIter, span, dcX, dcY, refIdx) {
-    gl.viewport(view[0], view[1], view[2], view[3]);
-    gl.useProgram(p.prog); gl.bindVertexArray(vao);
-    gl.uniform2f(p.locs.res, view[2], view[3]);
-    gl.uniform2f(p.locs.center, Number(centerRef[0] >> 60n) / 2**60, Number(centerRef[1] >> 60n) / 2**60);
-    gl.uniform2f(p.locs.dc_off, dcX, dcY);
-    gl.uniform1f(p.locs.span, span);
-    gl.uniform1i(p.locs.iter, maxIter);
-    gl.uniform3f(p.locs.col, p.col[0], p.col[1], p.col[2]);
-    gl.uniform2f(p.locs.jit, jx, jy);
-    gl.uniform1f(p.locs.alpha, alpha);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[refIdx]); gl.uniform1i(p.locs.ref, 0);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-}
-
-function loop() {
-    updateUI();
-    
-    if(isCompiling) {
-        let done = true;
-        if(extParallel) done = pendingProgs.every(p => gl.getProgramParameter(p.prog, extParallel.COMPLETION_STATUS_KHR));
-        else { compileWaitFrames++; if(compileWaitFrames < 2) done = false; }
-        
-        if(done) {
-            if(gridProgs) gridProgs.forEach(p => progsToDelete.push(p));
-            gridProgs = pendingProgs;
-            gridProgs.forEach(p => {
-                if (!gl.getProgramParameter(p.prog, gl.LINK_STATUS)) console.error("Link err: " + gl.getProgramInfoLog(p.prog));
-                p.locs = {
-                    res: gl.getUniformLocation(p.prog, 'u_res'), center: gl.getUniformLocation(p.prog, 'u_center'),
-                    dc_off: gl.getUniformLocation(p.prog, 'u_dc_offset'), span: gl.getUniformLocation(p.prog, 'u_span'),
-                    iter: gl.getUniformLocation(p.prog, 'u_iter'), col: gl.getUniformLocation(p.prog, 'u_color'),
-                    jit: gl.getUniformLocation(p.prog, 'u_jitter'), alpha: gl.getUniformLocation(p.prog, 'u_alpha'),
-                    ref: gl.getUniformLocation(p.prog, 'u_ref_tex')
-                };
-            });
-            progsToDelete.forEach(deleteProgram); progsToDelete = [];
-            
-            let zeroData = new Float32Array(256*256*2);
-            for(let i=0; i<4; i++) {
-                gl.bindTexture(gl.TEXTURE_2D, refOrbitTex[i]);
-                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RG, gl.FLOAT, zeroData);
-            }
-            
-            isCompiling = false; mode = 'GRID'; frameCount = 0; tileIdx = 0; zoom = 1.0; centerVirt = [0n, 0n]; centerRef = [0n, 0n]; 
-        }
-    }
-    
-    if(mode === 'FULL' && !isMoving && !isComputingRef && !isWaitingForWorker && !isCompiling && (centerVirt[0] !== centerRef[0] || centerVirt[1] !== centerRef[1])) {
-        reqOrbit(currentAst, 0);
-    }
-
-    let iter = Math.min(65500, Math.floor(150 + Math.max(0, Math.log10(zoom)) * 300));
-    let span = 4.0 / zoom;
-    let dcX = Number(centerVirt[0] - centerRef[0]) / 2**120;
-    let dcY = Number(centerVirt[1] - centerRef[1]) / 2**120;
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, accumFbo);
-    if(frameCount === 0) { gl.disable(gl.BLEND); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); }
-    else { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
-
-    if(mode === 'FULL' && fullProg && fullProg.locs) {
-        if(isMoving || isWaitingForWorker || isCompiling || isComputingRef) {
-            gl.disable(gl.SCISSOR_TEST);
-            renderShader(fullProg, [0, 0, w, h], 1.0, 0, 0, 200, span, dcX, dcY, 0);
-            needsPreview = false; lastMoveTime = performance.now();
-        } else if(performance.now() - lastMoveTime > 200) {
-            gl.enable(gl.SCISSOR_TEST);
-            let tw = Math.ceil(w / gridTilesX), th = Math.ceil(h / gridTilesY);
-            let tx = (tileIdx % gridTilesX) * tw, ty = Math.floor(tileIdx / gridTilesX) * th;
-            gl.scissor(tx, ty, tw, th);
-            let alpha = frameCount === 0 ? 1.0 : 1.0 / (frameCount + 1);
-            let jx = frameCount > 0 ? (Math.random()-0.5)*1.5 : 0;
-            let jy = frameCount > 0 ? (Math.random()-0.5)*1.5 : 0;
-            renderShader(fullProg, [0, 0, w, h], alpha, jx, jy, iter, span, dcX, dcY, 0);
-            gl.disable(gl.SCISSOR_TEST);
-            tileIdx++; if(tileIdx >= gridTilesX * gridTilesY) { tileIdx = 0; frameCount++; }
-        }
-    } else if(mode === 'GRID' && !isCompiling && !isWaitingForWorker && gridProgs[0] && gridProgs[0].locs) {
-        gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND);
-        let hw = Math.floor(w/2), hh = Math.floor(h/2);
-        renderShader(gridProgs[0], [0, hh, hw, h-hh], 1.0, 0, 0, 150, 4.0, 0, 0, 0);
-        renderShader(gridProgs[1], [hw, hh, w-hw, h-hh], 1.0, 0, 0, 150, 4.0, 0, 0, 1);
-        renderShader(gridProgs[2], [0, 0, hw, hh], 1.0, 0, 0, 150, 4.0, 0, 0, 2);
-        renderShader(gridProgs[3], [hw, 0, w-hw, hh], 1.0, 0, 0, 150, 4.0, 0, 0, 3);
-    }
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, w, h); gl.disable(gl.BLEND);
-    
-    if (gl.getProgramParameter(hudProg, gl.LINK_STATUS)) {
-        gl.useProgram(hudProg); gl.bindVertexArray(vao);
-        gl.uniform2f(hudLocs.res, w, h);
-        gl.uniform1f(hudLocs.scale, resScale * window.devicePixelRatio);
-        gl.uniform4fv(hudLocs.btns, btnRects); gl.uniform1iv(hudLocs.hvr, btnHvr);
-        gl.uniform1iv(hudLocs.txt_btn, btnTxt); gl.uniform1iv(hudLocs.b_lens, btnLens);
-        
-        let fStr = (isCompiling || isWaitingForWorker) ? "EVOLVING MUTATIONS..." : (isComputingRef ? "CALCULATING ORBIT..." : "Z = " + astToStr(currentAst));
-        fillStr(fStr, strArr1); gl.uniform1iv(hudLocs.txt1, strArr1); gl.uniform1i(hudLocs.len1, fStr.length);
-        
-        let sStr = mode === 'FULL' ? `ZOOM: 1e${Math.max(0, Math.log10(zoom)).toFixed(1)} | DE LIMIT: ${iter} | SAMPLES: ${isMoving ? 0 : frameCount}` : "";
-        fillStr(sStr, strArr2); gl.uniform1iv(hudLocs.txt2, strArr2); gl.uniform1i(hudLocs.len2, mode==='FULL' ? sStr.length : -1);
-        
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    } else {
-        gl.useProgram(fullProg ? fullProg.prog : null); 
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accumTex);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    }
-
-    requestAnimationFrame(loop);
-}
-loop();
 </script>
 </body>
 </html>
